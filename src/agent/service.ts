@@ -945,11 +945,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				doneNotice: (steps) => messages.notices.stepsDone(steps),
 				nothingDoneNotice: () => messages.notices.nothingDone,
 				// A read of the harness's own, which asks the owner nothing: without their consent already
-				// given, or the platform's permission, it reads nothing
+				// given, or the platform's permission, it reads nothing. It lists from the owner's day, which
+				// the contract requires, and leaves the rest to the contract's defaults.
 				ownerEvents: async () => {
 					const tool = turnTools.find(LIST_CALENDAR_EVENTS);
 					if (tool === null) return null;
-					const outcome = await runTool(tool, {}, { ...context, unattended: true });
+					const outcome = await runTool(
+						tool,
+						{ from: dateIn(now, timeZone) },
+						{ ...context, unattended: true }
+					);
 					log.info(
 						{ tool: LIST_CALENDAR_EVENTS, status: toolCallStatus(outcome) },
 						'events read for a check'

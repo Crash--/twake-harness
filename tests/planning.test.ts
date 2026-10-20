@@ -2,7 +2,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { grantConsent } from './helpers/consents.js';
-import { echoScript, type ScriptedReply, type ToolCall } from './helpers/fake-apisix.js';
+import {
+	CALENDAR_CATALOG as PUBLISHED_CALENDAR,
+	echoScript,
+	type ScriptedReply,
+	type ToolCall
+} from './helpers/fake-apisix.js';
 
 // The calendar of these tests: an event and a slot to read, an invitation to accept
 const CALENDAR_CATALOG = {
@@ -69,15 +74,14 @@ function call(id: string, name: string, args: unknown = {}): ToolCall {
 	return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
 }
 
-// The calendar once more, with the events to list, as the contracts name them, and an invitation to
-// decline: the invitation the owner accepted is planned, the one they did not name is not
+// The calendar once more, with the events to list, as the contracts service publishes them, and an
+// invitation to decline: the invitation the owner accepted is planned, the one they did not name is
+// not
 const EXTENDED_CATALOG = {
 	...CALENDAR_CATALOG,
 	paths: {
 		...CALENDAR_CATALOG.paths,
-		'/contracts/v1/calendar/events': {
-			get: { operationId: 'list_calendar_events', tags: ['calendar.event.read.v1'], parameters: [] }
-		},
+		'/contracts/v1/calendar/events': PUBLISHED_CALENDAR.paths['/contracts/v1/calendar/events'],
 		'/contracts/v1/calendar/invitations/{event_id}/decline': {
 			post: {
 				operationId: 'decline_invitation',
@@ -335,12 +339,16 @@ describe('a turn whose request is planned in steps by a decision model', () => {
 			body: { events: [{ title: 'Budget review', note: 'moved to Friday by Bob' }] }
 		});
 		h.apisix.llm.script = () => ({ content: 'The budget review was moved to Friday.' });
+		const today = (): string => new Date().toISOString().slice(0, 10);
+		const before = today();
 		const { body } = await chat(h, 'Any news on the budget review meeting?');
 		expect(body.answer).toBe('The budget review was moved to Friday.');
 		expect(body.pending_call).toBeUndefined();
 		expect(h.apisix.contracts.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
 			'GET /contracts/v1/calendar/events'
 		]);
+		// The contract lists from a day it is given: the owner's, in the zone of the deployment
+		expect([before, today()]).toContain(h.apisix.contracts.calls[0]?.query['from']);
 		expect(h.apisix.llm.checks[0]?.request.messages[1]?.content).toMatch(
 			/\[result of list_calendar_events\].*moved to Friday by Bob/
 		);
