@@ -2284,14 +2284,17 @@ describe('the assistant proposes from the messages of channels', () => {
 				const c = await listenedConversation();
 				await inviteeAssistant(c);
 				await shareAvailability(c);
+				const { room, assistant } = await inviteeRoom(c);
 				await ownerRoom(c);
-				// The invitee's own assistant room, joined so that its messages can be read, with what
-				// the assistant already wrote there as the baseline
-				const roomRows = await h.db.sql<{ room_id: string }[]>`
-					select room_id from assistant_rooms where owner = ${c.otherPrincipal} limit 1`;
-				const inviteeRoom = roomRows[0]?.room_id ?? '';
-				await c.otherClient.joinRoom(inviteeRoom);
-				const baseline = (await h.synapse.messagesFrom(c.other, inviteeRoom, c.assistant)).length;
+				// The invitee's assistant writes its welcome in that room a few seconds after they joined
+				// it, whatever the answers do, and it is the one thing it has said there so far: it is
+				// waited for, so that the messages counted from there on are those an answer would post.
+				// Their client reads the room, since everything the assistants write in it is encrypted.
+				// Every message counts, not only a question: whatever an answer wrote there breaks the
+				// title.
+				await c.otherClient.waitForMessage(room, assistant, () => true, 60_000);
+				const posted = (): DecryptedMessage[] => writtenInRoom(c, room, assistant);
+				const baseline = posted().length;
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
 					inviteeFree: () => true,
@@ -2307,12 +2310,11 @@ describe('the assistant proposes from the messages of channels', () => {
 						),
 					60_000
 				);
-				await sleep(1000);
+				// Long enough for a message that the answer sent to reach their client
+				await sleep(3000);
 				// Nothing was written to the invitee's room by their assistant, and nothing in the
 				// listened conversation either
-				expect((await h.synapse.messagesFrom(c.other, inviteeRoom, c.assistant)).length).toBe(
-					baseline
-				);
+				expect(posted()).toHaveLength(baseline);
 				expect(c.written()).toHaveLength(0);
 			});
 
