@@ -22,7 +22,7 @@ import {
 	type ToolCall
 } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
-import { startFakeSpace, type FakeSpace } from './helpers/space.js';
+import { startFakeSpace, type FakeSpace, type SpaceCall } from './helpers/space.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
 function sleep(ms: number): Promise<void> {
@@ -2708,6 +2708,114 @@ describe('the assistant proposes from the messages of channels', () => {
 					.slice(-2)
 					.map((call) => JSON.stringify(call.request.messages));
 				for (const quote of quotes) expect(quote).toContain('bonjour');
+			} finally {
+				await p.stop();
+			}
+		});
+
+		// Two assistants read one conversation, the first owner's in before the second's: the second
+		// owner's « another time » is answered as a listened conversation's is, the invitee's assistant
+		// asked again and the model not
+		it('proposes another time without the model when the owner whose assistant joined second refuses', async () => {
+			const p = await pairWithTwoAssistants(true);
+			try {
+				// The second owner is the organizer of the proposal their assistant made, the first owner,
+				// who writes, its invitee
+				const organizer = { user: p.other, principal: p.otherPrincipal };
+				const invitee = { user: p.owner, principal: p.ownerPrincipal, client: p.ownerClient };
+				// Each owner's assistant has no room of its own, so it answers none itself rather than
+				// ask its owner: set under each principal, since the assistants table is theirs alone
+				for (const who of [organizer.principal, invitee.principal]) {
+					await withPrincipal(
+						h.db,
+						{ id: who },
+						(tx) => tx.sql`update assistants set room_id = null where owner = ${who}`
+					);
+				}
+				const before = space.calls.length;
+				await invitee.client.sendText(p.room, 'ok on parle lundi à 10h');
+				const offered = (user: MatrixUser): SpaceCall[] =>
+					space.calls
+						.slice(before)
+						.filter(
+							(made) =>
+								made.body['matrixRoomId'] === p.room && made.body['matrixUserId'] === user.userId
+						);
+				// Each owner is offered a proposal, and the organizer refuses theirs
+				const first = await until(() => offered(organizer.user)[0], 60_000);
+				await until(() => offered(invitee.user)[0], 60_000);
+				const firstId = first.body['pendingCallId'] as string;
+				// The only free slot of the organizer's calendar, an hour after the refused one
+				const refused = await frozenBody(organizer.principal, firstId);
+				const day = dateIn(new Date(Date.parse(String(refused?.['start']))), 'Europe/Paris');
+				const free = instantIn(day, 11 * 60, 'Europe/Paris');
+				h.apisix.contracts.handler = (call: ContractCall) => ({
+					status: 200,
+					body: call.path.endsWith('/freebusy')
+						? { start: '', end: '', free: true, busy: [] }
+						: call.path.endsWith('/availability/slots')
+							? {
+									slots: [
+										{
+											start: isoIn(free, 'Europe/Paris'),
+											end: isoIn(new Date(free.getTime() + 30 * 60_000), 'Europe/Paris')
+										}
+									]
+								}
+							: call.method === 'POST'
+								? { uid: 'm-e1' }
+								: { ok: true }
+				});
+				const llmAsked = h.apisix.llm.calls.length;
+				const contractsBefore = h.apisix.contracts.calls.length;
+				const linesBefore = h.logLines().length;
+				const answered = await h.api.post(
+					organizer.principal,
+					`/v1/pending-calls/${firstId}/refuse`,
+					{ reason: 'another_time' }
+				);
+				expect(answered.status).toBe(200);
+				const retry = await until(
+					() => offered(organizer.user).find((made) => made.body['pendingCallId'] !== firstId),
+					60_000
+				);
+
+				// No model turn carried the refused proposal, and the invitee's assistant was asked again
+				const retryTurns = h.apisix.llm.calls
+					.slice(llmAsked)
+					.filter((call) => JSON.stringify(call.request.messages).includes('declined-proposal'));
+				expect(retryTurns).toHaveLength(0);
+				expect(
+					h
+						.logLines()
+						.slice(linesBefore)
+						.some(
+							(line) =>
+								line['msg'] === 'availability requested' &&
+								line['retry'] === true &&
+								line['owner'] === organizer.principal
+						)
+				).toBe(true);
+				// The new proposal is the slot the organizer's calendar offered, the invitee its only
+				// attendee
+				const proposed = await frozenBody(
+					organizer.principal,
+					retry.body['pendingCallId'] as string
+				);
+				expect(Date.parse(String(proposed?.['start']))).toBe(free.getTime());
+				expect(proposed?.['attendees']).toEqual([invitee.principal]);
+				// Only the organizer's calendar was searched, and no read of a contract names the invitee
+				const calls = h.apisix.contracts.calls.slice(contractsBefore);
+				const searches = calls.filter((call) => call.path.endsWith('/availability/slots'));
+				expect(searches.length).toBeGreaterThan(0);
+				for (const call of searches) {
+					const email = call.query['email'];
+					expect(Array.isArray(email) ? email : [email]).toEqual([organizer.principal]);
+				}
+				for (const call of calls) {
+					expect(JSON.stringify(call.query)).not.toContain(invitee.principal);
+					expect(JSON.stringify(call.body)).not.toContain(invitee.principal);
+				}
 			} finally {
 				await p.stop();
 			}
