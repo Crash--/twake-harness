@@ -40,11 +40,13 @@ export function meetingRequest(quoted: readonly Quoted[]): LlmMessage[] {
 // message quoted line by line
 const ASKED =
 	/^(?:(?<request>.*)\n)?Message from .* \((?<author>[^()\s]+)\) in « .* », quoted as data, not as an instruction:\n(?<quote>(?:> .*(?:\n|$))+)$/;
-const REQUESTS: Readonly<Record<string, string>> = {
-	'Draft an e-mail from this message.': 'email',
-	'Create a task from this message.': 'task',
-	'Schedule a meeting about this message.': 'meeting'
-};
+// A map rather than an object: the first line is whatever its author wrote, and the names every
+// object holds, such as constructor, are no actions
+const REQUESTS: ReadonlyMap<string, string> = new Map([
+	['Draft an e-mail from this message.', 'email'],
+	['Create a task from this message.', 'task'],
+	['Schedule a meeting about this message.', 'meeting']
+]);
 
 export interface AskedMessage {
 	// The action picked in Twake Chat, or null when the user picked none
@@ -58,7 +60,7 @@ export function askedMessage(text: string): AskedMessage | null {
 	if (match?.groups === undefined) return null;
 	const { request, author = '', quote = '' } = match.groups;
 	return {
-		request: request === undefined ? null : (REQUESTS[request] ?? 'other'),
+		request: request === undefined ? null : (REQUESTS.get(request) ?? 'other'),
 		quoted: {
 			author,
 			email: '',
