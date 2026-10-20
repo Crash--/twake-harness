@@ -1185,14 +1185,20 @@ describe('the assistant proposes from the messages of channels', () => {
 			);
 			const refusedStart = refused[0]?.starts_at;
 			if (refusedStart === undefined) throw new Error('no suggestion recorded');
-			// One free slot an hour after the refused one, the only one the owner's calendar offers
+			// One free slot an hour after the refused one, the only one the owner's calendar offers: 11:00
+			// that day in Paris, at the offset Paris has that day (+01:00 once summer time has ended)
 			const day = dateIn(new Date(refusedStart), 'Europe/Paris');
+			const eleven = instantIn(day, 11 * 60, 'Europe/Paris');
+			const free = {
+				start: isoIn(eleven, 'Europe/Paris'),
+				end: isoIn(new Date(eleven.getTime() + 30 * 60_000), 'Europe/Paris')
+			};
 			h.apisix.contracts.handler = (call: ContractCall) => ({
 				status: 200,
 				body: call.path.endsWith('/freebusy')
 					? { start: '', end: '', free: true, busy: [] }
 					: call.path.endsWith('/availability/slots')
-						? { slots: [{ start: `${day}T11:00:00+02:00`, end: `${day}T11:30:00+02:00` }] }
+						? { slots: [free] }
 						: call.method === 'POST'
 							? { uid: 'm-e1' }
 							: { ok: true }
@@ -1227,7 +1233,7 @@ describe('the assistant proposes from the messages of channels', () => {
 			const args = readJsonColumn(frozen[0]?.arguments) as {
 				body?: Record<string, unknown>;
 			};
-			expect(args.body?.['start']).toBe(`${day}T11:00:00+02:00`);
+			expect(args.body?.['start']).toBe(free.start);
 			expect(args.body?.['attendees']).toEqual([c.otherPrincipal]);
 			expect(args.body?.['title']).toBe('Point lundi');
 			// Before the yes, no contract call names the invitee
