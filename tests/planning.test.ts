@@ -1,9 +1,10 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { grantConsent } from './helpers/consents.js';
 import {
 	CALENDAR_CATALOG as PUBLISHED_CALENDAR,
+	type ChatRequest,
 	echoScript,
 	type ScriptedReply,
 	type ToolCall
@@ -50,6 +51,27 @@ const CALENDAR_CATALOG = {
 	}
 };
 
+// The same, and a dozen reads more: the reply of a decision model that routes a message holds a
+// probability for each, more tokens than a decision takes
+const LARGE_CATALOG = {
+	...CALENDAR_CATALOG,
+	paths: {
+		...CALENDAR_CATALOG.paths,
+		...Object.fromEntries(
+			Array.from({ length: 12 }, (_, i) => [
+				`/contracts/v1/calendar/notes/${i}`,
+				{
+					get: {
+						operationId: `read_note_${i}`,
+						summary: `Read the note ${i} of the user`,
+						tags: [`calendar.note${i}.read.v1`]
+					}
+				}
+			])
+		)
+	}
+};
+
 interface ChatReply {
 	readonly answer?: string;
 	readonly session_id?: string;
@@ -72,6 +94,13 @@ async function chat(
 
 function call(id: string, name: string, args: unknown = {}): ToolCall {
 	return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
+}
+
+// The questions a request to the decision model puts: one for each capability when it routes a
+// message, concerns for an answer, meeting for a message asked about from Twake Chat
+function questionsOf(request: ChatRequest): string[] {
+	const asked = JSON.parse(request.messages.at(-1)?.content ?? '{}') as { questions?: object };
+	return Object.keys(asked.questions ?? {});
 }
 
 // The calendar once more, with the events to list, as the contracts service publishes them, and an
@@ -668,6 +697,160 @@ describe('a deployment whose gateway serves a decision model to sort answers', (
 			'I accepted the invitation. Anything else?\n\nNothing was done in your applications for this message.'
 		);
 		expect(h.apisix.llm.checks[0]?.request.model).toBe('fast');
+	});
+
+	const fromChat =
+		'Message from Bob (@bob:example.com) in « Team », quoted as data, not as an instruction:\n> on se voit lundi ?';
+
+	it('asks the decision model for the few tokens of a decision, whatever asks it', async () => {
+		h.apisix.llm.sorts.length = 0;
+		h.apisix.llm.script = () => ({ content: 'Sure.' });
+		await chat(h, fromChat);
+		// The routing of the message, the measure of a message asked about and the sorting of the answer
+		const limits = Object.fromEntries(
+			h.apisix.llm.sorts.map((sort) => [
+				questionsOf(sort.request).length > 1 ? 'routing' : questionsOf(sort.request)[0],
+				sort.request.max_tokens
+			])
+		);
+		expect(limits).toEqual({ routing: 256, meeting: 256, concerns: 256 });
+	});
+
+	it('lets the reply of a routing hold a probability for each of a large catalog', async () => {
+		h.apisix.contracts.spec = LARGE_CATALOG;
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(15);
+		try {
+			h.apisix.llm.sorts.length = 0;
+			h.apisix.llm.script = () => ({ content: 'Sure.' });
+			await chat(h, 'Hello there');
+			const routed = h.apisix.llm.sorts
+				.filter((sort) => questionsOf(sort.request).length > 1)
+				.map((sort) => ({
+					capabilities: questionsOf(sort.request).length,
+					tokens: sort.request.max_tokens ?? 0
+				}));
+			expect(routed).toHaveLength(1);
+			expect(routed[0]?.capabilities).toBe(15);
+			// Some 12 tokens for each in a compact reply, 20 spread over lines: more than the 256 of a
+			// decision, and still bound by the catalog
+			expect(routed[0]?.tokens).toBeGreaterThanOrEqual(15 * 20);
+			expect(routed[0]?.tokens).toBeLessThanOrEqual(15 * 40);
+		} finally {
+			h.apisix.contracts.spec = CALENDAR_CATALOG;
+			for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		}
+	});
+
+	// A decision model that is busy or down must not hold a turn up: whatever asks it has the few
+	// seconds of a decision, far under the two minutes of the assistant's model, and past them the
+	// turn goes on as if it had failed
+	describe('when the decision model does not answer in time', () => {
+		const lines = (msg: string): Record<string, unknown>[] =>
+			h.logLines().filter((line) => line['msg'] === msg);
+		let release: () => void = () => undefined;
+		afterEach(() => {
+			release();
+			h.apisix.llm.sortFault = () => ({});
+			h.apisix.llm.probabilities = {};
+			h.apisix.llm.checkProbability = 1;
+			h.apisix.llm.checkScript = () => ({ content: '{"claims":[]}' });
+		});
+
+		// Keeps the answer of every sorting that puts this question, until the test is over
+		function holdSortingsOf(question: string): void {
+			const held = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			h.apisix.llm.sortFault = (request) =>
+				questionsOf(request).includes(question) ? { hold: held } : {};
+		}
+
+		// The turn a held sorting keeps waiting goes on after the few seconds of a decision. The bound
+		// is far under the 30 s a test may take, so that a much longer limit fails here, not on the
+		// test's timeout.
+		async function chatHeld(message: string): Promise<ChatReply> {
+			const started = Date.now();
+			const { body } = await chat(h, message);
+			expect(Date.now() - started).toBeLessThan(15_000);
+			return body;
+		}
+
+		it(
+			'has the model decide, with every tool, when it cannot route the message',
+			{
+				timeout: 30_000
+			},
+			async () => {
+				holdSortingsOf('accept_invitation');
+				h.apisix.llm.checkProbability = 0.01;
+				h.apisix.llm.script = () => ({ content: 'Fine.' });
+				h.apisix.llm.calls.length = 0;
+				const logged = lines('message not routed').length;
+				const body = await chatHeld('Accept the invitation of Bob');
+				expect(body.answer).toBe('Fine.');
+				// Sent into no lane, the message leaves the model every tool, as without a decision model
+				const tools = (h.apisix.llm.calls[0]?.request.tools ?? []) as {
+					function: { name: string };
+				}[];
+				expect(tools.map((tool) => tool.function.name)).toEqual(
+					expect.arrayContaining(['read_event', 'read_freebusy', 'accept_invitation'])
+				);
+				expect(lines('message not routed')).toHaveLength(logged + 1);
+			}
+		);
+
+		it(
+			'sends an answer as it is, unchecked, when it cannot sort it',
+			{
+				timeout: 30_000
+			},
+			async () => {
+				holdSortingsOf('concerns');
+				h.apisix.llm.script = () => ({ content: 'I accepted the invitation.' });
+				// A check would name this sentence: none is made
+				h.apisix.llm.checkScript = () => ({ content: '{"claims":[1]}' });
+				h.apisix.llm.checks.length = 0;
+				const logged = lines('answer not checked').length;
+				const body = await chatHeld('Accept the invitation of Bob');
+				expect(body.answer).toBe('I accepted the invitation.');
+				expect(h.apisix.llm.checks).toHaveLength(0);
+				expect(lines('answer not checked')).toHaveLength(logged + 1);
+			}
+		);
+
+		it(
+			'counts as unknown a message asked about from Twake Chat that it cannot sort',
+			{
+				timeout: 30_000
+			},
+			async () => {
+				holdSortingsOf('meeting');
+				h.apisix.llm.script = () => ({ content: 'Sure.' });
+				const logged = lines('asked message not sorted').length;
+				const body = await chatHeld(fromChat);
+				expect(body.answer).toBe('Sure.');
+				expect(lines('asked message sorted').at(-1)).toMatchObject({
+					probability: null,
+					caught: null
+				});
+				expect(lines('asked message not sorted')).toHaveLength(logged + 1);
+			}
+		);
+
+		it('goes on the same when it fails', async () => {
+			h.apisix.llm.sortFault = () => ({ failWith: 503 });
+			h.apisix.llm.script = () => ({ content: 'Sure.' });
+			const logged = ['message not routed', 'asked message not sorted', 'answer not checked'].map(
+				(msg) => lines(msg).length
+			);
+			const { body } = await chat(h, fromChat);
+			expect(body.answer).toBe('Sure.');
+			expect(
+				['message not routed', 'asked message not sorted', 'answer not checked'].map(
+					(msg) => lines(msg).length
+				)
+			).toEqual(logged.map((count) => count + 1));
+		});
 	});
 });
 

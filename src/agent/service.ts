@@ -115,6 +115,7 @@ import {
 	type SuggestionResult
 } from './suggestion.js';
 import type { AvailabilityPayload } from '../suggestions/availability.js';
+import { makeDecisionClient } from '../suggestions/sort.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -388,6 +389,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			maxTokens: config.llm.maxTokens,
 			timeoutMs: config.llm.timeoutMs
 		});
+	const decisionLlm = makeDecisionClient(config.apisix, config.llm.decisionModel);
 	const { consentMetrics } = deps;
 	const contracts = makeContractCatalog({ config, log: deps.log, consentMetrics });
 	const tools = makeToolRegistry(
@@ -916,7 +918,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				contracts.contracts.find((c) => c.toolName === name && c.level === 'write');
 			const guard: TurnGuard = {
 				checkModel: config.llm.checkModel,
-				decisionModel: config.llm.decisionModel,
+				decision: decisionLlm,
 				action: (name) => {
 					const contract = written(name);
 					if (contract === undefined) return null;

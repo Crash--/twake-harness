@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { MAX_PLAN_STEPS } from '../src/agent/plan.js';
-import { laneOf, type Capability } from '../src/agent/route.js';
+import { laneOf, routeMaxTokens, type Capability } from '../src/agent/route.js';
 
 const read = (name: string): Capability => ({ name, description: name, acts: false });
 const write = (name: string): Capability => ({ name, description: name, acts: true });
@@ -45,5 +45,13 @@ describe('the lane of a message, from what the decision model read', () => {
 		expect(named.map((capability) => capability.name)).toContain('create_event');
 		// The least likely reads are those left out
 		expect(named.map((capability) => capability.name)).not.toContain('read_0');
+	});
+});
+
+describe('the tokens the decision model may write to sort a message', () => {
+	it('are those of a decision, or more where its reply would not fit the catalog', () => {
+		expect(routeMaxTokens(6, 256)).toBe(256);
+		// A probability for each capability: some 12 tokens each in a compact reply, 20 spread over lines
+		expect(routeMaxTokens(59, 256)).toBeGreaterThanOrEqual(59 * 20);
 	});
 });

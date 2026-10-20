@@ -1,13 +1,35 @@
-import type { LlmMessage } from '../llm/client.js';
+import {
+	makeLlmClient,
+	type LlmClient,
+	type LlmClientOptions,
+	type LlmMessage
+} from '../llm/client.js';
 import type { Quoted } from './job.js';
 
 // The least probability at which messages are taken to arrange a meeting. It is a net: the model
 // that then reads the messages tells them apart.
 export const MEETING_THRESHOLD = 0.8;
 // The decision model writes a probability in a few tokens, within a fraction of a second: past a
-// few seconds, or when it is busy, the words decide
+// few seconds, or when it is busy, a sorting is one that failed, and whatever asked for it goes on
+// without it. A channel's words decide, an owner's turn is left to the assistant's model. Every
+// call to it has these limits, so that nothing waits on it as long as on the assistant's model.
 export const DECISION_MAX_TOKENS = 256;
 export const DECISION_TIMEOUT_MS = 5000;
+
+// The gateway's client for the decision model, held to the limits above wherever it is called from:
+// the matrix role's channels and the agents' turns
+export function makeDecisionClient(
+	gateway: Pick<LlmClientOptions, 'baseUrl' | 'consumerKey'>,
+	model: string
+): LlmClient {
+	return makeLlmClient({
+		baseUrl: gateway.baseUrl,
+		consumerKey: gateway.consumerKey,
+		model,
+		maxTokens: DECISION_MAX_TOKENS,
+		timeoutMs: DECISION_TIMEOUT_MS
+	});
+}
 
 // What a decision model is asked of the messages of a channel before any other model reads them:
 // whether they arrange a meeting at a given time. It reads the messages, never who wrote them:
