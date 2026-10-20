@@ -63,7 +63,7 @@ import type { SourceRegistry } from './sources/sources.js';
 import { suggestGroup, type SuggestPayload } from './suggestions/job.js';
 import {
 	findSuggestion,
-	listenedRoomOwner,
+	listensToRoom,
 	muteRoomFor,
 	readCallArguments,
 	readSettings,
@@ -1084,7 +1084,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							// A proposal of an encrypted conversation its owner invited their assistant
 							// into: the retry searches the owner's calendar alone and never reaches the
 							// model, so the room and the invitee it remembers travel with it
-							const listened = (await listenedRoomOwner(tx, suggestion.roomId)) === principal.id;
+							const listened = await listensToRoom(tx, principal.id, suggestion.roomId);
 							const invitee = meeting.attendees[0];
 							const payload: SuggestPayload = {
 								owner: principal.id,

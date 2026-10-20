@@ -54,12 +54,13 @@ export async function muteRoomFor(
 			set until = case when suggestion_mutes.until is null then null else excluded.until end`;
 }
 
-// The owner an assistant reads this encrypted conversation for, or null: a suggestion made there,
+// Whether an assistant reads this encrypted conversation for this owner: a suggestion made there,
 // and its second try at another time, search the owner's calendar alone and never the invitee's.
-export async function listenedRoomOwner(tx: Tx, roomId: string): Promise<string | null> {
-	const rows = await tx.sql<{ owner: string }[]>`
-		select owner from assistant_listened_rooms where room_id = ${roomId}`;
-	return rows[0]?.owner ?? null;
+// Several owners' assistants may read one conversation, so it is asked of the owner who answers.
+export async function listensToRoom(tx: Tx, owner: string, roomId: string): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from assistant_listened_rooms where room_id = ${roomId} and owner = ${owner} limit 1`;
+	return rows.length > 0;
 }
 
 export interface SuggestionRecord {
