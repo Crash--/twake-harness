@@ -2,7 +2,7 @@
 // the deployment's. The model is told to speak it; these are the fixed texts around it.
 
 import type { RefusalReason } from '../agent/admission.js';
-import type { Weekday } from '../agent/clock.js';
+import type { Tomorrow, Weekday } from '../agent/clock.js';
 import type { BriefDomain } from '../briefs/questions.js';
 import type { Answer, UntoldKind } from '../briefs/untold.js';
 import type { ConsentLevel } from '../consents/consent.js';
@@ -393,8 +393,9 @@ export interface Messages {
 		): string;
 	};
 	// What the model is told of the present at the start of every turn, so that it can place
-	// "today" or "this afternoon" and give contracts times with the right offset
-	now(words: string, iso: string, timeZone: string): string;
+	// "today", "tomorrow" or "this afternoon" and give contracts times with the right offset: the
+	// day after is handed to it with today, rather than left to count from today's date
+	now(words: string, iso: string, timeZone: string, tomorrow: Tomorrow): string;
 	// How the model addresses the person writing to it, told in that language, when the language
 	// marks it: null when it does not
 	readonly addressing: string | null;
@@ -1024,12 +1025,13 @@ const ENGLISH: Messages = {
 			return `Your quiet hours: ${parts.join(', and ')}. What arrives for you meanwhile waits for your brief or their end, unless it is a meeting that starts before.`;
 		}
 	},
-	now: (words, iso, timeZone) =>
+	now: (words, iso, timeZone, tomorrow) =>
 		[
 			'## Now',
 			`Date and time: ${words}, time zone ${timeZone}.`,
 			`In ISO 8601: ${iso}.`,
-			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.',
+			'Use them to place "today" or "this afternoon", and give contracts RFC 3339 times with this offset.',
+			`Tomorrow: ${tomorrow.words} (${tomorrow.iso}). This is the date to write when you say "tomorrow": copy that day rather than work it out from today's date.`,
 			'Each date handed to you as data is written in words beside it, its day of the week included, under a key ending in _in_words: copy that day rather than work it out from the date.'
 		].join('\n'),
 	addressing: null,
@@ -1465,12 +1467,13 @@ const FRENCH: Messages = {
 			return `Tes heures calmes : ${parts.join(', et ')}. Ce qui t'arrive pendant ce temps attend ton brief ou leur fin, sauf une réunion qui commence avant.`;
 		}
 	},
-	now: (words, iso, timeZone) =>
+	now: (words, iso, timeZone, tomorrow) =>
 		[
 			'## Maintenant',
 			`Date et heure : ${words}, fuseau ${timeZone}.`,
 			`En ISO 8601 : ${iso}.`,
-			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+			"Sers-t'en pour situer « aujourd'hui » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+			`Demain : ${tomorrow.words} (${tomorrow.iso}). C'est la date à écrire quand tu dis « demain » : reprends ce jour plutôt que de le déduire de la date d'aujourd'hui.`,
 			"Chaque date qu'on te donne en données est écrite en toutes lettres à côté d'elle, jour de la semaine compris, sous une clé qui finit par _in_words : reprends ce jour plutôt que de le déduire de la date."
 		].join('\n'),
 	addressing:

@@ -337,6 +337,23 @@ describe('a listened suggestion that waits for an availability answer', () => {
 			moment = null;
 		}
 	});
+
+	it("tells the model tomorrow's date beside today's, to place a message that says « demain »", async () => {
+		const lena = await ownerNamed('lena');
+		// Saturday 10 October 2026, 04:43 in UTC, the zone of this deployment
+		const sentAt = Date.parse('2026-10-10T04:43:00Z');
+		moment = new Date(sentAt);
+		try {
+			const before = callsSoFar();
+			expect(await pass(await suggestListened(lena, sentAt))).toBe('deferred');
+			const system = h.apisix.llm.calls[before]?.request.messages[0]?.content ?? '';
+			expect(system).toContain('Date and time: Saturday, October 10, 2026, 04:43, time zone UTC.');
+			expect(system).toContain('Tomorrow: Sunday, October 11, 2026 (2026-10-11).');
+		} finally {
+			moment = null;
+		}
+	});
+
 	// What the owner is told when nothing could be proposed, by how the calendar took the searches
 	describe('when the harness could not propose a slot', () => {
 		const busy = { status: 200, body: { start: '', end: '', free: false, busy: [] } };

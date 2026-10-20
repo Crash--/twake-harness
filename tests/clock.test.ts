@@ -63,13 +63,15 @@ function nowBlock(prompt: string): string | undefined {
 	return prompt.split('\n\n')[1];
 }
 
-// That block in French, for this date and time in words, this zone and this ISO 8601 instant
-function frenchNow(words: string, timeZone: string, iso: string): string {
+// That block in French, for this date and time in words, this zone, this ISO 8601 instant and the
+// day after, in words and as ISO 8601 writes it
+function frenchNow(words: string, timeZone: string, iso: string, tomorrow: string): string {
 	return [
 		'## Maintenant',
 		`Date et heure : ${words}, fuseau ${timeZone}.`,
 		`En ISO 8601 : ${iso}.`,
-		"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+		"Sers-t'en pour situer « aujourd'hui » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+		`Demain : ${tomorrow}. C'est la date à écrire quand tu dis « demain » : reprends ce jour plutôt que de le déduire de la date d'aujourd'hui.`,
 		"Chaque date qu'on te donne en données est écrite en toutes lettres à côté d'elle, jour de la semaine compris, sous une clé qui finit par _in_words : reprends ce jour plutôt que de le déduire de la date."
 	].join('\n');
 }
@@ -101,7 +103,40 @@ describe('the present moment in the system prompt', () => {
 			clock.set('2026-10-06T11:26:00Z');
 			const prompt = await systemPromptOfTurn(h, 'alice', 'Et demain ?');
 			expect(nowBlock(prompt)).toBe(
-				frenchNow('mardi 6 octobre 2026, 13:26', 'Europe/Paris', '2026-10-06T13:26:00+02:00')
+				frenchNow(
+					'mardi 6 octobre 2026, 13:26',
+					'Europe/Paris',
+					'2026-10-06T13:26:00+02:00',
+					'mercredi 7 octobre 2026 (2026-10-07)'
+				)
+			);
+		});
+
+		it("gives tomorrow's date beside today's: a Sunday on a Saturday", async () => {
+			// Saturday 10 October 2026, 06:43 in Paris, when an answer named the Monday for « demain »
+			clock.set('2026-10-10T04:43:00Z');
+			const prompt = await systemPromptOfTurn(h, 'alice', "Qu'ai-je demain ?");
+			expect(nowBlock(prompt)).toBe(
+				frenchNow(
+					'samedi 10 octobre 2026, 06:43',
+					'Europe/Paris',
+					'2026-10-10T06:43:00+02:00',
+					'dimanche 11 octobre 2026 (2026-10-11)'
+				)
+			);
+		});
+
+		it('gives the first day of the next month as tomorrow on the last day of a month', async () => {
+			// Wednesday 30 September 2026, 18:05 in Paris
+			clock.set('2026-09-30T16:05:00Z');
+			const prompt = await systemPromptOfTurn(h, 'alice', 'Et demain ?');
+			expect(nowBlock(prompt)).toBe(
+				frenchNow(
+					'mercredi 30 septembre 2026, 18:05',
+					'Europe/Paris',
+					'2026-09-30T18:05:00+02:00',
+					'jeudi 1 octobre 2026 (2026-10-01)'
+				)
 			);
 		});
 
@@ -139,13 +174,16 @@ describe('the present moment in the system prompt', () => {
 			await h.close();
 		});
 
-		it('states the moment in English, in UTC, with an explicit +00:00 offset', async () => {
+		it('states the moment in English, in UTC, with an explicit +00:00 offset, and the day after', async () => {
 			const prompt = await systemPromptOfTurn(h, 'alice', 'Am I free at 2pm?');
 			expect(prompt).toContain(
 				[
 					'## Now',
 					'Date and time: Tuesday, October 6, 2026, 11:26, time zone UTC.',
-					'In ISO 8601: 2026-10-06T11:26:00+00:00.'
+					'In ISO 8601: 2026-10-06T11:26:00+00:00.',
+					'Use them to place "today" or "this afternoon", and give contracts RFC 3339 times with this offset.',
+					'Tomorrow: Wednesday, October 7, 2026 (2026-10-07). This is the date to write when you say "tomorrow": copy that day rather than work it out from today\'s date.',
+					'Each date handed to you as data is written in words beside it, its day of the week included, under a key ending in _in_words: copy that day rather than work it out from the date.'
 				].join('\n')
 			);
 		});
@@ -182,7 +220,12 @@ describe('the present moment in the system prompt', () => {
 			});
 			// Still Tuesday evening in New York, when it is already Wednesday in Paris
 			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
-				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
+				frenchNow(
+					'mardi 6 octobre 2026, 19:30',
+					'America/New_York',
+					'2026-10-06T19:30:00-04:00',
+					'mercredi 7 octobre 2026 (2026-10-07)'
+				)
 			);
 		});
 
@@ -193,8 +236,14 @@ describe('the present moment in the system prompt', () => {
 				from: '2026-10-07',
 				days: 1
 			});
+			// Already Wednesday in Paris, so « demain » is the Thursday, though UTC is on Tuesday still
 			expect(nowBlock(await systemPromptOfTurn(h, 'bob', 'Et demain ?'))).toBe(
-				frenchNow('mercredi 7 octobre 2026, 01:30', 'Europe/Paris', '2026-10-07T01:30:00+02:00')
+				frenchNow(
+					'mercredi 7 octobre 2026, 01:30',
+					'Europe/Paris',
+					'2026-10-07T01:30:00+02:00',
+					'jeudi 8 octobre 2026 (2026-10-08)'
+				)
 			);
 		});
 
@@ -209,7 +258,12 @@ describe('the present moment in the system prompt', () => {
 			h.apisix.contracts.handler = calendarIn('Asia/Tokyo');
 			await readCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
 			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
-				frenchNow('mercredi 7 octobre 2026, 08:30', 'Asia/Tokyo', '2026-10-07T08:30:00+09:00')
+				frenchNow(
+					'mercredi 7 octobre 2026, 08:30',
+					'Asia/Tokyo',
+					'2026-10-07T08:30:00+09:00',
+					'jeudi 8 octobre 2026 (2026-10-08)'
+				)
 			);
 		});
 
@@ -223,7 +277,8 @@ describe('the present moment in the system prompt', () => {
 			const newYork = frenchNow(
 				'mardi 6 octobre 2026, 19:30',
 				'America/New_York',
-				'2026-10-06T19:30:00-04:00'
+				'2026-10-06T19:30:00-04:00',
+				'mercredi 7 octobre 2026 (2026-10-07)'
 			);
 			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(newYork);
 			for (const named of ['Mars/Olympus', '', 7, null]) {
@@ -245,7 +300,12 @@ describe('the present moment in the system prompt', () => {
 			const failed = await makeClient(h).tool('alice', 'read_calendar_event', { uid: 'uid-gone' });
 			expect(failed.body).toMatchObject({ status: 404 });
 			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
-				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
+				frenchNow(
+					'mardi 6 octobre 2026, 19:30',
+					'America/New_York',
+					'2026-10-06T19:30:00-04:00',
+					'mercredi 7 octobre 2026 (2026-10-07)'
+				)
 			);
 		});
 
@@ -296,7 +356,12 @@ describe('the present moment in the system prompt', () => {
 			expect(resumed.status).toBe(200);
 			// The model read the events with the present of their zone
 			expect(nowBlock(systemPromptAfter(h, before))).toBe(
-				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
+				frenchNow(
+					'mardi 6 octobre 2026, 19:30',
+					'America/New_York',
+					'2026-10-06T19:30:00-04:00',
+					'mercredi 7 octobre 2026 (2026-10-07)'
+				)
 			);
 		});
 

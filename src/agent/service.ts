@@ -54,7 +54,7 @@ import {
 	type BriefResult,
 	type BriefResumeInput
 } from './brief.js';
-import { dateIn, describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
+import { dateIn, describeMoment, describeTomorrow, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
 	carriesInvitation,
@@ -894,6 +894,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const timeZone = await fetchOwnerTimeZone(db, principal.id, config.timeZone);
 			const now = clock.now();
 			const moment = describeMoment(now, timeZone, locale);
+			const tomorrow = describeTomorrow(now, timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
 			const offered = comesFromOthers(origin)
@@ -984,7 +985,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 												: assistantPrompt(input.assistantName, toolNames),
 											messages
 										),
-							moment: messages.now(moment.words, moment.iso, moment.timeZone),
+							moment: messages.now(moment.words, moment.iso, moment.timeZone, tomorrow),
 							woken,
 							memory,
 							skills,
