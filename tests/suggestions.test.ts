@@ -12,7 +12,7 @@ import {
 import { makeSpaceNotifications } from '../src/suggestions/space.js';
 import { grantConsent } from './helpers/consents.js';
 import { eventually } from './helpers/feedback.js';
-import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
+import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	MEETING_CATALOG,
 	toolsOf,
@@ -1564,6 +1564,33 @@ describe('the assistant proposes from the messages of channels', () => {
 				return { room, assistant };
 			}
 
+			// What the invitee's assistant wrote in its room, as their own client reads it. Its welcome
+			// is among it: it is queued with no group key where the questions carry the room's, so it
+			// can come before or after any of them, and a count of all of it can move on a request
+			// that wrote nothing
+			const writtenInRoom = (
+				c: Conversation,
+				room: string,
+				assistant: string
+			): DecryptedMessage[] =>
+				c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant);
+
+			// What the question about sharing the availability says, whatever the colleague and the
+			// period it names, in the catalog's words (suggestions.availabilitySharing.question). The
+			// wait for the question and every count of the questions read it from here, so that a
+			// reworded question stops the wait before a count can pass with nothing left to count
+			const SHARING_QUESTION = 'asking me for your availability';
+
+			// Of what the invitee's assistant wrote in its room, the questions that ask them to share
+			// their availability. The welcome is never one, so a count of them holds still whenever
+			// the welcome lands
+			const questionsAsked = (
+				c: Conversation,
+				room: string,
+				assistant: string
+			): DecryptedMessage[] =>
+				writtenInRoom(c, room, assistant).filter((m) => m.body.includes(SHARING_QUESTION));
+
 			// The question the harness asked the invitee about sharing their availability, once their
 			// own assistant wrote it in their room: the event that carries it, and its text, which
 			// names the colleague and the period
@@ -1575,12 +1602,10 @@ describe('the assistant proposes from the messages of channels', () => {
 				const text = await c.otherClient.waitForMessage(
 					room,
 					assistant,
-					(t) => t.includes(c.ownerPrincipal) && t.includes('asking me for your availability'),
+					(t) => t.includes(c.ownerPrincipal) && t.includes(SHARING_QUESTION),
 					60_000
 				);
-				const found = c.otherClient.messages.find(
-					(m) => m.roomId === room && m.sender === assistant && m.body === text
-				);
+				const found = writtenInRoom(c, room, assistant).find((m) => m.body === text);
 				return { eventId: found?.eventId ?? '', text };
 			}
 
@@ -1760,9 +1785,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				// The next request asks no question: the invitee's assistant answers none itself, and
 				// the organizer falls back again, in the same words. The room's one-suggestion window
 				// is cleared, as a next day would clear it, so that a second request is made at all.
-				const questionsBefore = c.otherClient.messages.filter(
-					(m) => m.roomId === room && m.sender === assistant
-				).length;
+				const questionsBefore = questionsAsked(c, room, assistant).length;
 				await withPrincipal(
 					h.db,
 					{ id: c.ownerPrincipal },
@@ -1773,9 +1796,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				const second = await proposalSeen(c, 'not_seen', lines2);
 				expect(second.pendingCallId).not.toBe(first.pendingCallId);
 				await sleep(3000);
-				expect(
-					c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant).length
-				).toBe(questionsBefore);
+				expect(questionsAsked(c, room, assistant)).toHaveLength(questionsBefore);
 			});
 
 			it('falls back on the organizer’s calendar, and tells the invitee so, once the window closes with no answer', async () => {
@@ -1864,26 +1885,14 @@ describe('the assistant proposes from the messages of channels', () => {
 					{ id: c.ownerPrincipal },
 					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
 				);
-				const questionsBefore = c.otherClient.messages.filter(
-					(m) =>
-						m.roomId === room &&
-						m.sender === assistant &&
-						String(m.body).includes('asking me for your availability')
-				).length;
+				const questionsBefore = questionsAsked(c, room, assistant).length;
 				const lines2 = h.logLines().length;
 				await c.otherClient.sendText(c.room, ASKING2);
 				const second = await proposalSeen(c, 'seen_free', lines2);
 				expect(second.pendingCallId).toBeTruthy();
 				// No question was asked about the sharing: the yes already answered it
 				await sleep(3000);
-				expect(
-					c.otherClient.messages.filter(
-						(m) =>
-							m.roomId === room &&
-							m.sender === assistant &&
-							String(m.body).includes('asking me for your availability')
-					).length
-				).toBe(questionsBefore);
+				expect(questionsAsked(c, room, assistant)).toHaveLength(questionsBefore);
 			});
 
 			it('falls back with no question once the invitee takes the share back on the agreements page', async () => {
@@ -1916,10 +1925,11 @@ describe('the assistant proposes from the messages of channels', () => {
 				await c.otherClient.sendText(c.room, ASKING);
 				const first = await proposalSeen(c, 'not_seen', linesBefore);
 				expect(first.pendingCallId).toBeTruthy();
-				// The next request, a day later, asks no question either
-				const questionsBefore = c.otherClient.messages.filter(
-					(m) => m.roomId === room && m.sender === assistant
-				).length;
+				// The first request asked no question, since the refusal stands, and the next one, a day
+				// later, asks none either. Only the questions are counted: the invitee's assistant also
+				// writes its welcome in this room, a few seconds after its owner joined it
+				const questionsBefore = questionsAsked(c, room, assistant).length;
+				expect(questionsBefore).toBe(0);
 				await withPrincipal(
 					h.db,
 					{ id: c.ownerPrincipal },
@@ -1930,9 +1940,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				const second = await proposalSeen(c, 'not_seen', lines2);
 				expect(second.pendingCallId).not.toBe(first.pendingCallId);
 				await sleep(3000);
-				expect(
-					c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant).length
-				).toBe(questionsBefore);
+				expect(questionsAsked(c, room, assistant)).toHaveLength(questionsBefore);
 			});
 
 			it('proposes the asked time and says the invitee is free, reading their calendar for them alone', async () => {
@@ -2435,12 +2443,7 @@ describe('the assistant proposes from the messages of channels', () => {
 					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
 				);
 				await c.otherClient.sendText(c.room, 'on se fait une réunion mardi à 8h ?');
-				const text = await c.otherClient.waitForMessage(
-					again.body.roomId,
-					again.body.userId,
-					(t) => t.includes(c.ownerPrincipal) && t.includes('asking me for your availability'),
-					60_000
-				);
+				const { text } = await sharingQuestion(c, again.body.roomId, again.body.userId);
 				expect(text).toContain('free slots only');
 			});
 
