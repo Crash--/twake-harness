@@ -17,15 +17,15 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 // A number of days, an integer from 1 to 31
 const DAY_COUNT = /^(?:[1-9]|[12]\d|3[01])$/;
 
+// The operation that lists the owner's events over whole days, as the contracts name it
+export const LIST_CALENDAR_EVENTS: string = 'list_calendar_events';
+
 // The calendar's operations, by operationId, that the harness does more with than call them
 const CALENDAR_OPERATIONS = new Map<string, CalendarOperation>([
 	// The owner's events over whole days of their calendar's zone, from a date. The gateway's audit
 	// keeps only the path of a call, and checking which days a list read, the ones the model took
 	// for "today" or "tomorrow", takes its from and days.
-	[
-		'list_calendar_events',
-		{ namesOwnerZone: true, loggedArguments: { from: DAY, days: DAY_COUNT } }
-	],
+	[LIST_CALENDAR_EVENTS, { namesOwnerZone: true, loggedArguments: { from: DAY, days: DAY_COUNT } }],
 	// One of the owner's events, or one occurrence of it
 	['read_calendar_event', { namesOwnerZone: true, loggedArguments: {} }]
 ]);

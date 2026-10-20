@@ -107,6 +107,7 @@ import { publishedUnder, type Source, type SourceRegistry } from '../sources/sou
 import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
+import { LIST_CALENDAR_EVENTS } from './calendar.js';
 import { withoutCallMarkup } from './call-markup.js';
 import {
 	dateIn,
@@ -122,9 +123,7 @@ import { buildSystemPrompt } from './prompt.js';
 import { runTool, type ToolContext, type ToolOutcome, type ToolRegistry } from './tools.js';
 import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
-// The calendar's operation the brief reads the day and the invitations of, and the most meetings it
-// reads of the day
-const LIST_EVENTS = 'list_calendar_events';
+// The most meetings the brief reads of the day
 const MAX_MEETINGS = 20;
 
 // The invitations that wait for the owner's answer, over seven days from the brief's: the read gives
@@ -1016,7 +1015,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return dayOf(
 			await read(
 				asksDelegation ? { ...context, asksDelegation } : context,
-				LIST_EVENTS,
+				LIST_CALENDAR_EVENTS,
 				{ from: date, days: 1, limit: MAX_MEETINGS },
 				listSchema
 			)
@@ -1026,7 +1025,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	async function readInvitations(context: ToolContext, date: string): Promise<Read<Invitations>> {
 		const list = await read(
 			context,
-			LIST_EVENTS,
+			LIST_CALENDAR_EVENTS,
 			{
 				from: date,
 				days: INVITATION_DAYS,

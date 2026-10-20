@@ -8,8 +8,9 @@ export const ROUTING_CAPABILITIES: readonly Capability[] = [
 		acts: false
 	},
 	{
-		name: 'list_events',
-		description: 'List the events and invitations the user received',
+		name: 'list_calendar_events',
+		description:
+			"List the events of the user's calendars over days, or only the invitations waiting for the user's answer",
 		acts: false
 	},
 	{ name: 'search_emails', description: "Searches the user's mail", acts: false },
@@ -63,14 +64,14 @@ const FREEBUSY: readonly RoutingCase[] = [
 ];
 
 const EVENTS: readonly RoutingCase[] = [
-	['Quelles invitations ai-je reçues ?', ['list_events']],
-	['Montre-moi mes dernières invitations', ['list_events']],
-	['Y a-t-il de nouveaux événements pour moi ?', ['list_events']],
-	["Qu'est-ce que j'ai reçu comme invitations aujourd'hui ?", ['list_events']],
-	['What invitations did I get this week?', ['list_events']],
-	['List the events I received', ['list_events']],
-	['Any new invitations?', ['list_events']],
-	['Show me my pending invitations', ['list_events']]
+	['Quelles invitations ai-je reçues ?', ['list_calendar_events']],
+	['Montre-moi mes dernières invitations', ['list_calendar_events']],
+	['Y a-t-il de nouveaux événements pour moi ?', ['list_calendar_events']],
+	["Qu'est-ce que j'ai reçu comme invitations aujourd'hui ?", ['list_calendar_events']],
+	['What invitations did I get this week?', ['list_calendar_events']],
+	['List the events I received', ['list_calendar_events']],
+	['Any new invitations?', ['list_calendar_events']],
+	['Show me my pending invitations', ['list_calendar_events']]
 ];
 
 const ACCEPT: readonly RoutingCase[] = [

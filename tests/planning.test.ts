@@ -69,14 +69,14 @@ function call(id: string, name: string, args: unknown = {}): ToolCall {
 	return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
 }
 
-// The calendar once more, with the events to list and an invitation to decline: the invitation
-// the owner accepted is planned, the one they did not name is not
+// The calendar once more, with the events to list, as the contracts name them, and an invitation to
+// decline: the invitation the owner accepted is planned, the one they did not name is not
 const EXTENDED_CATALOG = {
 	...CALENDAR_CATALOG,
 	paths: {
 		...CALENDAR_CATALOG.paths,
-		'/contracts/v1/events': {
-			get: { operationId: 'list_events', tags: ['events.read.v1'], parameters: [] }
+		'/contracts/v1/calendar/events': {
+			get: { operationId: 'list_calendar_events', tags: ['calendar.event.read.v1'], parameters: [] }
 		},
 		'/contracts/v1/calendar/invitations/{event_id}/decline': {
 			post: {
@@ -329,7 +329,7 @@ describe('a turn whose request is planned in steps by a decision model', () => {
 	});
 
 	it('reads the events of the owner itself to check an answer against, asking them nothing', async () => {
-		// The owner already lets their assistant read their events: without that, it reads nothing
+		// The owner already lets their assistant read their calendar: without that, it reads nothing
 		h.apisix.contracts.handler = () => ({
 			status: 200,
 			body: { events: [{ title: 'Budget review', note: 'moved to Friday by Bob' }] }
@@ -339,10 +339,10 @@ describe('a turn whose request is planned in steps by a decision model', () => {
 		expect(body.answer).toBe('The budget review was moved to Friday.');
 		expect(body.pending_call).toBeUndefined();
 		expect(h.apisix.contracts.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
-			'GET /contracts/v1/events'
+			'GET /contracts/v1/calendar/events'
 		]);
 		expect(h.apisix.llm.checks[0]?.request.messages[1]?.content).toMatch(
-			/\[result of list_events\].*moved to Friday by Bob/
+			/\[result of list_calendar_events\].*moved to Friday by Bob/
 		);
 	});
 

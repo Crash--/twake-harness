@@ -54,6 +54,7 @@ import {
 	type BriefResult,
 	type BriefResumeInput
 } from './brief.js';
+import { LIST_CALENDAR_EVENTS } from './calendar.js';
 import { dateIn, describeMoment, describeTomorrow, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -154,9 +155,6 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
 // check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
 // their yes resumes is told of no event, and is not held to them.
-// The contract that lists the events the platform holds of an owner, as the catalog names it
-const OWNER_EVENTS_TOOL = 'list_events';
-
 const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
 const CHECK_ALONE = ['read_freebusy'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
@@ -949,16 +947,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				// A read of the harness's own, which asks the owner nothing: without their consent already
 				// given, or the platform's permission, it reads nothing
 				ownerEvents: async () => {
-					const tool = turnTools.find(OWNER_EVENTS_TOOL);
+					const tool = turnTools.find(LIST_CALENDAR_EVENTS);
 					if (tool === null) return null;
 					const outcome = await runTool(tool, {}, { ...context, unattended: true });
 					log.info(
-						{ tool: OWNER_EVENTS_TOOL, status: toolCallStatus(outcome) },
+						{ tool: LIST_CALENDAR_EVENTS, status: toolCallStatus(outcome) },
 						'events read for a check'
 					);
 					return toolCallStatus(outcome) !== 'ok'
 						? null
-						: { role: 'tool', name: OWNER_EVENTS_TOOL, content: JSON.stringify(outcome.result) };
+						: { role: 'tool', name: LIST_CALENDAR_EVENTS, content: JSON.stringify(outcome.result) };
 				}
 			};
 			try {
