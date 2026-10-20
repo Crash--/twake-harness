@@ -1,12 +1,19 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Clock } from '../agent/clock.js';
-import { carriesInvitation, instantOfStart, type Invitation } from '../agent/invitation.js';
+import {
+	carriesInvitation,
+	instantOfStart,
+	INVITATION_ANSWERS,
+	type Invitation
+} from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
 import { briefSettingsOf } from '../briefs/settings.js';
 import type { Config } from '../config.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
+import { supersedeInvitationRequests, type ClosedRequest } from '../consents/repository.js';
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
@@ -92,6 +99,8 @@ export interface WakeDeps {
 	readonly log: FastifyBaseLogger;
 	// The present the daily reminders, the briefs and the listening journal read
 	readonly clock: Clock;
+	// Where the role counts the requests a meeting's cancellation closes, when it counts any
+	readonly consentMetrics?: ConsentMetrics;
 }
 
 export interface WakeOptions {
@@ -204,6 +213,21 @@ async function queueTurn(
 	await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
 }
 
+// Closes the requests to answer the invitation to a meeting that a wake-up tells is cancelled,
+// which Calendar refuses an answer to. A request names an invitation by its UID alone, never an
+// occurrence, and nothing tells whether the cancellation of one occurrence of a series leaves others
+// to answer: it closes none.
+async function closeRequestsOfCancelledMeeting(
+	tx: Tx,
+	wakeup: Wakeup,
+	owner: string
+): Promise<ClosedRequest[]> {
+	if (wakeup.type !== CANCELLED_EVENT_TYPE || !carriesInvitation(wakeup)) return [];
+	return wakeup.invitation.scope === 'occurrence'
+		? []
+		: supersedeInvitationRequests(tx, owner, wakeup.invitation.uid, INVITATION_ANSWERS);
+}
+
 // Wakes the assistant of the person a wake-up is for, its owner: a turn of origin event in their
 // room, serialized with their other turns, which tells them of the event it carries, or of origin
 // brief for the brief the scheduler asks for. The owner is
@@ -214,7 +238,8 @@ async function queueTurn(
 // event they are woken for or their cap holds back, and for their brief, with no turn, a task they
 // assigned themselves or an activity its source keeps for it, such as a meeting's new title or one
 // that names them for a reason that expects nothing of them, none of which wakes them twice; a
-// brief, which the scheduler tries again, it never notes.
+// brief, which the scheduler tries again, it never notes. The cancellation of a meeting also closes
+// the requests of its owner to answer its invitation, as a newer request would.
 export async function wake(
 	deps: WakeDeps,
 	wakeup: Wakeup,
@@ -235,6 +260,7 @@ export async function wake(
 	// The application an activity comes from, by the source it was published under: one the
 	// harness does not know is listened to by nobody
 	const application = isActivity ? sourceOfActivity(wakeup.source) : null;
+	const closed: ClosedRequest[] = [];
 	const outcome = await withPrincipal(db, { id: owner }, async (tx) => {
 		const assistant = await findAssistant(tx, owner);
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
@@ -262,6 +288,9 @@ export async function wake(
 		if (prior?.seen === true || (await wasNoted(tx, owner, wakeup.source, wakeup.id))) {
 			return 'duplicate' as const;
 		}
+		// A cancelled meeting has nothing left to answer, whether its owner is told of it now, after
+		// their quiet hours or never, past their cap
+		closed.push(...(await closeRequestsOfCancelledMeeting(tx, wakeup, owner)));
 		const noteAs = (journaled: ActivityOutcome): Promise<void> =>
 			noteActivity(tx, owner, {
 				source: wakeup.source,
@@ -297,6 +326,10 @@ export async function wake(
 	});
 	const logged = { source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner };
 	if (outcome === 'woken') deps.log.info(logged, 'event queued');
+	for (const request of closed) {
+		deps.log.info({ owner, pendingCallId: request.pendingCallId }, 'request superseded');
+		deps.consentMetrics?.superseded(request);
+	}
 	// A source the harness does not know publishes for nobody: its operator learns which
 	if (outcome === 'unlistened' && application === null) {
 		deps.log.warn(logged, 'activity of an unknown source, listened to by nobody');

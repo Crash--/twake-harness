@@ -20,7 +20,8 @@ export interface ConsentMetrics {
 	// A call frozen until its owner answers
 	requested(call: CallSubject): void;
 	answered(call: CallSubject, answer: Answer, via: AnswerKind, outcome: AnswerOutcome): void;
-	// A request closed unanswered: its lifetime ran out, or a newer one in its room replaced it
+	// A request closed unanswered: its lifetime ran out, or a newer one in its room replaced it, or
+	// the cancellation of its meeting did
 	expired(call: CallSubject): void;
 	superseded(call: CallSubject): void;
 	// The call its owner allowed ran

@@ -242,6 +242,25 @@ export async function supersedeRequests(
 	return closedRequests(rows);
 }
 
+// Marks the open requests of the owner to answer the invitation to a meeting as superseded, erasing
+// what their calls would have sent, the question and the digest of what their owner was shown. A
+// call of the given tools names the invitation by the UID in its body, and names no occurrence of a
+// series.
+export async function supersedeInvitationRequests(
+	tx: Tx,
+	owner: string,
+	uid: string,
+	tools: readonly string[]
+): Promise<ClosedRequest[]> {
+	const rows = await tx.sql<ClosedRow[]>`
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null,
+			request_text = null, preview_digest = null
+		where owner = ${owner} and status = 'open' and tool in ${tx.sql(tools)}
+			and (arguments #>> '{}')::jsonb #>> '{body,uid}' = ${uid}
+		returning id, domain, level, reasons`;
+	return closedRequests(rows);
+}
+
 // Closes the owner's requests left unanswered past their lifetime, erasing what their calls would
 // have sent, the question and the digest of what their owner was shown
 export async function expireRequests(

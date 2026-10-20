@@ -31,6 +31,10 @@ export function carriesInvitation<T extends { readonly invitation?: Invitation |
 	return event?.invitation !== undefined;
 }
 
+// The tools that answer an invitation to a meeting, by the UID it carries, each of which waits for
+// its owner's yes before it sends the answer
+export const INVITATION_ANSWERS = ['accept_invitation', 'decline_invitation'] as const;
+
 // The period read_freebusy is asked about, or why it is not asked
 export type InvitationSlot =
 	| { readonly ok: true; readonly start: string; readonly end: string }

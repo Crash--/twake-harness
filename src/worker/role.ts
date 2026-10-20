@@ -48,9 +48,9 @@ export interface WorkerRole {
 // wake-ups and of the listening journals past their retention and of the suggestions nothing reads
 // any more, each starting with a pass at once, the daily reminders of the permissions about to
 // expire, at their hour, and the briefs of the owners' working days, at the times they chose; the
-// expiries are counted on the metrics the role serves. With the activity exchange or Calendar's
-// fanout configured, the role also listens to it, and connects to the broker for that alone, once
-// for each.
+// requests it closes, expired or superseded, are counted on the metrics the role serves. With the
+// activity exchange or Calendar's fanout configured, the role also listens to it, and connects to
+// the broker for that alone, once for each.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const clock = options.clock ?? SYSTEM_CLOCK;
@@ -72,7 +72,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			),
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
-	const deps = { config, db, log: app.log, clock };
+	const deps = { config, db, log: app.log, clock, consentMetrics };
 	const listening =
 		options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs };
 	if (config.activity !== null) {

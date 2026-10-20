@@ -62,6 +62,7 @@ import {
 	carriesInvitation,
 	checkAvailability,
 	instantOfStart,
+	INVITATION_ANSWERS,
 	type Invitation,
 	type ToolRunner
 } from './invitation.js';
@@ -158,7 +159,7 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
 // check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
 // their yes resumes is told of no event, and is not held to them.
-const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
+const ANSWERS_TO_A_MOVE = ['read_freebusy', ...INVITATION_ANSWERS];
 const CHECK_ALONE = ['read_freebusy'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
 	string,
