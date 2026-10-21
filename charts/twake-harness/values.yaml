@@ -77,8 +77,9 @@ config:
   suggestionsUserLocalpart: ''
   # Whether owners may have their assistant listen to the Chat, which wakes it for a mention of
   # them they leave unread for ten minutes in a channel the listener is in (see docs/events.md).
-  # Off, the Chat cannot be listened to yet. On, set it on each role: the matrix role refuses to
-  # start without suggestionsEnabled
+  # Off, the Chat cannot be listened to yet. On, the next brief of each owner who never chose for
+  # it offers them once to have their assistant listen there; set it on each role: the matrix role
+  # refuses to start without suggestionsEnabled
   chatMentionsEnabled: false
   # Twake Space's API, where a suggestion is posted to the notifications of its user; empty means
   # a suggestion reaches the assistant's room alone. Its token, a tws_ API token with the scope

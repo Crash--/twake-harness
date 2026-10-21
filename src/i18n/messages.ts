@@ -371,8 +371,9 @@ export interface Messages {
 			readonly noAnswer: string;
 		};
 	};
-	// What the harness says once the owner chose whether their assistant listens to an application,
-	// named as the catalog names it, on which their turn ends
+	// What the harness says of an application their assistant may listen to, named as the owner reads
+	// it: once they chose whether it listens there, on which their turn ends, and in the source offer
+	// a brief makes them
 	readonly sources: {
 		// What reaches them there wakes their assistant from now on
 		listening(application: string): string;
@@ -389,6 +390,9 @@ export interface Messages {
 		listeningToChat(application: string, listener: string): string;
 		// They no longer do, and there is nothing their assistant reads there when they ask
 		notListeningToChat(application: string): string;
+		// The Chat's source offer: what its listening would do, as listeningToChat says it, and how to
+		// answer it
+		chatSourceOffer(application: string, listener: string): string;
 	};
 	// What the harness says once the owner set their quiet hours, on which their turn ends
 	readonly quietHours: {
@@ -1025,7 +1029,9 @@ const ENGLISH: Messages = {
 		listeningToChat: (application, listener) =>
 			`I am listening to ${application}: I will let you know of a mention of you that you leave unread for ten minutes, in the unencrypted rooms ${listener} is in and in the conversations I listen to. With private read receipts, I cannot see what you read, and I will remind you of every mention.`,
 		notListeningToChat: (application) =>
-			`I am no longer listening to ${application}: I will no longer let you know of the mentions of you that you leave unread.`
+			`I am no longer listening to ${application}: I will no longer let you know of the mentions of you that you leave unread.`,
+		chatSourceOffer: (application, listener) =>
+			`Shall I listen to ${application}? I would let you know of a mention of you that you leave unread for ten minutes, in the unencrypted rooms ${listener} is in and in the conversations I listen to. With private read receipts, I would not see what you read, and I would remind you of every mention. ${ENGLISH_HOW_TO_ANSWER}`
 	},
 	quietHours: {
 		none: 'You have no quiet hours: I will let you know what arrives for you at any hour.',
@@ -1477,7 +1483,9 @@ const FRENCH: Messages = {
 		listeningToChat: (application, listener) =>
 			`J'écoute ${application} : je te préviens d'une mention de toi que tu laisses non lue dix minutes, dans les salons non chiffrés où se trouve ${listener} et dans les conversations que j'écoute. Avec des accusés de lecture privés, je ne vois pas ce que tu lis, et je te rappelle chaque mention.`,
 		notListeningToChat: (application) =>
-			`Je n'écoute plus ${application} : je ne te préviens plus des mentions de toi que tu laisses non lues.`
+			`Je n'écoute plus ${application} : je ne te préviens plus des mentions de toi que tu laisses non lues.`,
+		chatSourceOffer: (application, listener) =>
+			`Veux-tu que j'écoute ${application} ? Je te préviendrais d'une mention de toi que tu laisses non lue dix minutes, dans les salons non chiffrés où se trouve ${listener} et dans les conversations que j'écoute. Avec des accusés de lecture privés, je ne verrais pas ce que tu lis, et je te rappellerais chaque mention. ${FRENCH_HOW_TO_ANSWER}`
 	},
 	quietHours: {
 		none: "Tu n'as pas d'heures calmes : je te préviens à toute heure de ce qui t'arrive.",

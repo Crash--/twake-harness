@@ -47,4 +47,6 @@
 
 `TURN_MAX_TOKENS` is meant to stay below `ADMISSION_USER_DAILY_TOKENS`: admission checks the tokens a user spent that day only when a turn starts, so once started, a turn is held by its own limit alone. The defaults leave it above, for deployments that raise the daily tokens, and a deployment that keeps `200000` a day lowers `TURN_MAX_TOKENS` too.
 
+Once `CHAT_MENTIONS_ENABLED` is on, the next brief of each owner who never chose whether their assistant listens to the Chat offers them once, after it, to have it listen there (see Listened sources).
+
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
