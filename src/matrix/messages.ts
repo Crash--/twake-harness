@@ -9,6 +9,8 @@ export interface RoomEvent {
 	readonly sender?: string;
 	readonly state_key?: string;
 	readonly event_id?: string;
+	// When its homeserver received it from its author, in milliseconds, by the homeserver's clock
+	readonly origin_server_ts?: number;
 	readonly content?: Record<string, unknown>;
 }
 
@@ -29,6 +31,9 @@ export interface ReadMessage {
 	// The message an edit replaces, null for a message that is no edit. Clients copy the mentions of
 	// the message they edit into the edit's, so an edit's mentions are mostly the same again.
 	readonly replaces: string | null;
+	// When its homeserver received it from its author, by the homeserver's clock: what tells which of
+	// two messages of a room came first, as a read receipt's message and a mention
+	readonly sentAt: Date;
 	// When the matrix role received it, by its own clock
 	readonly receivedAt: Date;
 }
@@ -61,12 +66,20 @@ function relatedBy(
 	return typeof related === 'string' ? related : null;
 }
 
+// When its homeserver received an event from its author, by the homeserver's clock: null for an
+// event that does not say
+export function sentAtOf(event: RoomEvent): Date | null {
+	return typeof event.origin_server_ts === 'number' ? new Date(event.origin_server_ts) : null;
+}
+
 // A message as the matrix role reads it once, from its content, as decrypted when it came
 // encrypted: the encryption engine gives the decrypted event the relation the encrypted one left in
-// the clear, when its content names none. Null for a message without an id or a sender.
+// the clear, when its content names none, and the time its homeserver gave it. Null for a message
+// without an id, a sender or that time.
 export function messageOf(roomId: string, event: RoomEvent, receivedAt: Date): ReadMessage | null {
 	const { event_id: eventId, sender } = event;
-	if (eventId === undefined || sender === undefined) return null;
+	const sentAt = sentAtOf(event);
+	if (eventId === undefined || sender === undefined || sentAt === null) return null;
 	const content = event.content ?? {};
 	return {
 		roomId,
@@ -76,6 +89,7 @@ export function messageOf(roomId: string, event: RoomEvent, receivedAt: Date): R
 		mentions: mentionsOf(content),
 		thread: relatedBy(content, 'm.thread') ?? MAIN_THREAD,
 		replaces: relatedBy(content, 'm.replace'),
+		sentAt,
 		receivedAt
 	};
 }
