@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { WEEKDAYS } from '../src/agent/clock.js';
+import { insertPendingCall } from '../src/consents/repository.js';
+import { withPrincipal } from '../src/db/client.js';
+import { saveQuietChoices } from '../src/settings/repository.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import {
 	lastUser,
@@ -9,10 +13,16 @@ import {
 	startActivityBroker,
 	startCalendarFanout,
 	toldOf,
+	until,
 	whenListening,
 	type CalendarFanout
 } from './helpers/activity.js';
-import { call, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
+import {
+	call,
+	QUESTION_CONTENT_KEY,
+	startConsentRoom,
+	type ConsentRoom
+} from './helpers/consent-room.js';
 import { grantConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
@@ -26,6 +36,7 @@ import {
 	type ScriptedReply,
 	type ToolCall
 } from './helpers/fake-apisix.js';
+import { total } from './helpers/metrics.js';
 import type { TestBroker } from './helpers/rabbitmq.js';
 
 const ALICE = 'alice@test.local';
@@ -159,6 +170,17 @@ const EVERY_WEEKLY_REVIEW = [
 	'DTEND;TZID=Europe/Paris:20261009T150000'
 ];
 
+// Bob's budget review, years away: it starts after any quiet hours of Alice have ended, so that
+// its cancellation waits for them like any other news
+const FAR_MEETING = [
+	'SUMMARY:Budget review',
+	'DTSTART;TZID=Europe/Paris:20991009T090000',
+	'DTEND;TZID=Europe/Paris:20991009T100000',
+	'ORGANIZER;CN=Bob:mailto:bob@test.local',
+	'ATTENDEE;PARTSTAT=ACCEPTED;ROLE=CHAIR:mailto:bob@test.local',
+	`ATTENDEE;PARTSTAT=ACCEPTED:mailto:${ALICE}`
+];
+
 // A notification of a cancellation as Calendar's side service publishes it for each invitee: a
 // CANCEL of the meeting, or of one occurrence of it, at SEQUENCE 1 unless told otherwise
 function cancellation(options: Omit<ChangeOptions, 'changes'>): Record<string, unknown> {
@@ -178,6 +200,22 @@ function cancellation(options: Omit<ChangeOptions, 'changes'>): Record<string, u
 		),
 		eventPath: `/calendars/a/b/${options.uid}.ics`
 	};
+}
+
+// A notification of a new invitation as Calendar's side service publishes it for a new invitee, at
+// SEQUENCE 0 with nothing changed and Alice's answer still to come
+function invitation(options: Omit<ChangeOptions, 'changes' | 'sequence'>): Record<string, unknown> {
+	const lines = (options.lines ?? CANCELLED_LINES).map((line) =>
+		line.endsWith(`:mailto:${ALICE}`)
+			? `ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:${ALICE}`
+			: line
+	);
+	const {
+		changes: _changes,
+		oldEvent: _oldEvent,
+		...asSent
+	} = change({ ...options, sequence: 0, lines });
+	return { ...asSent, isNewEvent: true };
 }
 
 interface AnswerOptions {
@@ -494,6 +532,67 @@ async function requestsAbout(
 // What reached Alice's applications other than reads, oldest first
 function writes(): ContractCall[] {
 	return r.h.apisix.contracts.calls.filter((c) => c.method !== 'GET');
+}
+
+// The ids of the requests that wait for Alice's answer, as her API lists them
+async function waiting(): Promise<string[]> {
+	const found = await r.h.api.get<{ pending_calls: { id: string }[] }>(ALICE, '/v1/pending-calls');
+	expect(found.status).toBe(200);
+	return found.body.pending_calls.map((c) => c.id);
+}
+
+// The id of the call a request of the harness is about, which its message carries for her client
+function idOf(request: DecryptedMessage): string {
+	return (request.content[QUESTION_CONTENT_KEY] as { id: string }).id;
+}
+
+// How many requests to answer an invitation the worker role counts as superseded
+async function supersededRequests(): Promise<number> {
+	const { body } = await worker.app.inject({ method: 'GET', url: '/metrics' });
+	return total([body], 'harness_consent_supersessions_total', {
+		domain: 'calendar',
+		level: 'write',
+		reason: 'event_turn'
+	});
+}
+
+// The ids of the requests the worker role closed as superseded, as its lines say
+function supersededIds(): unknown[] {
+	return logs
+		.lines()
+		.filter((line) => line['msg'] === 'request superseded')
+		.map((line) => line['pendingCallId']);
+}
+
+// What came of an activity, as the worker role's line says once it settled it without a turn
+function notedOf(id: string): Record<string, unknown>[] {
+	return logs.lines().filter((line) => line['msg'] === 'activity noted' && line['eventId'] === id);
+}
+
+// The activities held for Alice's quiet hours, by their ids
+async function held(): Promise<string[]> {
+	const rows = await withPrincipal(
+		r.h.db,
+		{ id: ALICE },
+		(tx) => tx.sql<{ event_id: string }[]>`
+			select event_id from held_activities where owner = ${ALICE} order by held_at, event_id`
+	);
+	return rows.map((row) => row.event_id);
+}
+
+// What her assistant told Alice of the cancellation of a meeting, by its UID
+function toldOfCancelled(uid: string): DecryptedMessage[] {
+	return r.saying('bob@test.local cancelled').filter((m) => m.body.includes(`(${uid})`));
+}
+
+// The state of a request, by its id, for its owner
+async function statusOf(owner: string, id: string): Promise<string | undefined> {
+	const rows = await withPrincipal(
+		r.h.db,
+		{ id: owner },
+		(tx) => tx.sql<{ status: string }[]>`select status from pending_calls where id = ${id}`
+	);
+	return rows[0]?.status;
 }
 
 // Every line the roles wrote, at any level
@@ -1237,5 +1336,199 @@ describe('an invitee answers a meeting I organize', () => {
 		]);
 		expect(sayingOf('no-invitee')).toEqual([]);
 		expect(sayingOf('no-answer')).toEqual([]);
+	});
+});
+
+// Last: each notification these leave in Alice's journal lengthens what the model repeats when she
+// asks what it saw today, and her room refuses an event past 64 KiB
+describe('a meeting I am invited to is cancelled before I answered its invitation', () => {
+	it.each([
+		['accept', 'cancelled-before-accepted'],
+		['decline', 'busy-cancelled-before-declined']
+	])(
+		'no longer asks me to %s an invitation I had not answered once its meeting is cancelled, and sends nothing on a late ✅',
+		async (_answer, uid) => {
+			await calendar.publish(invitation({ uid }));
+			const [request] = await requestsAbout(uid, 1);
+			if (request === undefined) throw new Error('no request about the invitation');
+			const id = idOf(request);
+			expect(await waiting()).toContain(id);
+			// She is told as she is of any cancellation, in a sentence
+			const sentence = `bob@test.local cancelled "Budget review" of 2026-10-09T09:00:00+02:00 (${uid}).`;
+			const superseded = await supersededRequests();
+			await calendar.publish(cancellation({ uid }));
+			expect(await r.nextSaying(sentence, 0)).toBe(sentence);
+			// The request about the invitation is closed with it: the worker role says so and counts it
+			expect(await waiting()).not.toContain(id);
+			expect(supersededIds()).toContain(id);
+			expect(await supersededRequests()).toBe(superseded + 1);
+			// Her ✅ to it sends nothing: it was closed as a newer request closes it
+			const writesBefore = writes().length;
+			const notices = r.saying('A newer request replaced this one').length;
+			await r.client.react(r.room, request.eventId, '✅');
+			await r.nextSaying('A newer request replaced this one', notices);
+			expect(writes()).toHaveLength(writesBefore);
+		}
+	);
+
+	it('closes my question to answer an invitation as its meeting is cancelled, though my quiet hours hold back what tells me of it', async () => {
+		const uid = 'cancelled-in-quiet-hours';
+		await calendar.publish(invitation({ uid, lines: FAR_MEETING }));
+		const [request] = await requestsAbout(uid, 1);
+		if (request === undefined) throw new Error('no request about the invitation');
+		const id = idOf(request);
+		expect(await waiting()).toContain(id);
+		// Every day is quiet for her
+		await withPrincipal(r.h.db, { id: ALICE }, (tx) =>
+			saveQuietChoices(tx, ALICE, { start: null, end: null, days: WEEKDAYS })
+		);
+		try {
+			const cancelled = producerId(uid, ALICE, '1', 'CANCEL');
+			await calendar.publish(cancellation({ uid, lines: FAR_MEETING }));
+			await until('the cancellation held', () => notedOf(cancelled).length > 0);
+			expect(notedOf(cancelled)).toEqual([
+				expect.objectContaining({ owner: ALICE, outcome: 'quiet_hours' })
+			]);
+			expect(await held()).toContain(cancelled);
+			// What tells her of it waits, and the request about the invitation does not
+			expect(toldOfCancelled(uid)).toEqual([]);
+			expect(await waiting()).not.toContain(id);
+			expect(supersededIds()).toContain(id);
+		} finally {
+			await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
+				await saveQuietChoices(tx, ALICE, { start: null, end: null, days: null });
+				await tx.sql`delete from held_activities where owner = ${ALICE}`;
+			});
+		}
+	});
+
+	it('closes my question to answer an invitation as its meeting is cancelled, though my hourly cap holds back what tells me of it', async () => {
+		const uid = 'cancelled-past-cap';
+		await calendar.publish(invitation({ uid }));
+		const [request] = await requestsAbout(uid, 1);
+		if (request === undefined) throw new Error('no request about the invitation');
+		const id = idOf(request);
+		expect(await waiting()).toContain(id);
+		// Her hour's wake-ups are spent
+		await r.h.db.sql`
+			insert into wakeups (source, event_id, owner)
+			select 'filler', 'filler-' || n, ${ALICE} from generate_series(1, ${r.h.config.wakeups.perHour}) as n`;
+		try {
+			const cancelled = producerId(uid, ALICE, '1', 'CANCEL');
+			await calendar.publish(cancellation({ uid }));
+			await until('the cancellation capped', () => notedOf(cancelled).length > 0);
+			expect(notedOf(cancelled)).toEqual([
+				expect.objectContaining({ owner: ALICE, outcome: 'capped' })
+			]);
+			// What tells her of it never comes, and the request about the invitation is closed
+			expect(toldOfCancelled(uid)).toEqual([]);
+			expect(await waiting()).not.toContain(id);
+			expect(supersededIds()).toContain(id);
+		} finally {
+			await r.h.db.sql`delete from wakeups where source = 'filler'`;
+		}
+	});
+
+	it('closes my questions to answer the invitation to a series, for one occurrence or for the whole series, once the whole series is cancelled', async () => {
+		const uid = 'weekly-cancelled-whole';
+		await calendar.publish(invitation({ uid, lines: EVERY_WEEKLY_REVIEW }));
+		const [request] = await requestsAbout(uid, 1);
+		if (request === undefined) throw new Error('no request about the invitation');
+		const id = idOf(request);
+		expect(await waiting()).toContain(id);
+		// The harness's question whether to answer for the whole series, as it asks it once Calendar
+		// refuses an answer to a recurring invitation: this suite's catalog previews no answer, so the
+		// call is frozen here
+		const wholeSeries = await withPrincipal(r.h.db, { id: ALICE }, (tx) =>
+			insertPendingCall(tx, {
+				owner: ALICE,
+				tool: 'accept_invitation',
+				contract: 'calendar',
+				domain: 'calendar',
+				level: 'write',
+				reasons: ['event_turn', 'series'],
+				arguments: { body: { uid, series: true } },
+				previewDigest: null,
+				correlationId: null,
+				origin: 'event',
+				sessionId: null,
+				request: 'This is a series in calendar: shall I answer for the whole series?'
+			})
+		);
+		await calendar.publish(cancellation({ uid, lines: EVERY_WEEKLY_REVIEW }));
+		await until('told of the cancellation', () => toldOfCancelled(uid).length > 0);
+		expect(await waiting()).not.toContain(id);
+		expect(await statusOf(ALICE, wholeSeries)).toBe('superseded');
+		expect(supersededIds()).toEqual(expect.arrayContaining([id, wholeSeries]));
+	});
+
+	it('leaves the question of another invitee to answer the same meeting open', async () => {
+		const uid = 'cancelled-for-alice-alone';
+		await calendar.publish(invitation({ uid }));
+		const [request] = await requestsAbout(uid, 1);
+		if (request === undefined) throw new Error('no request about the invitation');
+		const id = idOf(request);
+		// Carol's own copy of the invitation, with its UID, which her assistant asked her about
+		const carols = await withPrincipal(r.h.db, { id: CAROL }, (tx) =>
+			insertPendingCall(tx, {
+				owner: CAROL,
+				tool: 'accept_invitation',
+				contract: 'calendar',
+				domain: 'calendar',
+				level: 'write',
+				reasons: ['event_turn'],
+				arguments: { body: { uid } },
+				previewDigest: null,
+				correlationId: null,
+				origin: 'event',
+				sessionId: null,
+				request: EVENT_WRITE
+			})
+		);
+		try {
+			await calendar.publish(cancellation({ uid }));
+			await until('told of the cancellation', () => toldOfCancelled(uid).length > 0);
+			// Alice's request is closed, Carol's is not
+			expect(await waiting()).not.toContain(id);
+			expect(await statusOf(CAROL, carols)).toBe('open');
+			expect(supersededIds()).toContain(id);
+			expect(supersededIds()).not.toContain(carols);
+		} finally {
+			await withPrincipal(
+				r.h.db,
+				{ id: CAROL },
+				(tx) => tx.sql`delete from pending_calls where id = ${carols}`
+			);
+		}
+	});
+
+	it('keeps asking me to answer the invitation to a series when another meeting, or one occurrence of it, is cancelled', async () => {
+		const uid = 'weekly-before-answered';
+		await calendar.publish(invitation({ uid, lines: EVERY_WEEKLY_REVIEW }));
+		const [request] = await requestsAbout(uid, 1);
+		if (request === undefined) throw new Error('no request about the invitation');
+		const id = idOf(request);
+		// One occurrence of the series is cancelled, then another meeting: the request names the
+		// invitation by its UID alone, never an occurrence, and nothing tells whether others are left to
+		// answer
+		const said = r.saying('bob@test.local cancelled').length;
+		const superseded = await supersededRequests();
+		await calendar.publish(cancellation({ uid, lines: ONE_WEEKLY_REVIEW }));
+		await calendar.publish(cancellation({ uid: 'cancelled-aside' }));
+		// Once she is told of the second, the queue, read in order, has handled the first
+		await r.nextSaying('bob@test.local cancelled', said + 1);
+		expect(await waiting()).toContain(id);
+		expect(await supersededRequests()).toBe(superseded);
+		// Her ✅ still answers it
+		const answered = r.saying('Answered:').length;
+		await r.client.react(r.room, request.eventId, '✅');
+		expect(await r.nextSaying('Answered:', answered)).toBe(
+			`Answered: {"status":200,"body":{"uid":"${uid}","partstat":"ACCEPTED"}}`
+		);
+		expect(writes().at(-1)).toMatchObject({
+			method: 'POST',
+			path: '/contracts/v1/calendar/invitations/accept',
+			body: { uid }
+		});
 	});
 });

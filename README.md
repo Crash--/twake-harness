@@ -59,7 +59,7 @@ The assistant tells its owner, in their room and in a few words, of what arrives
 - **A task assigned to them** in Tasks, unless they assigned it themselves.
 - **A new invitation** in Calendar: who invites them, to what, when, and whether they are free then, with its acceptance prepared.
 - **A meeting moved**: who moved it, from when to when, and whether they are free over its new slot, with its decline prepared when the slot conflicts and its acceptance otherwise.
-- **A meeting cancelled**: who cancelled which meeting, in one sentence, asking nothing.
+- **A meeting cancelled**: who cancelled which meeting, in one sentence, asking nothing, and closing the question that still waits for their answer to its invitation, unless one occurrence of a series is cancelled.
 - **A counter-proposal** to a meeting they organize: which invitee proposes which time, and whether they are free then.
 
 A meeting's new title, the invitees' answers to a meeting they organize, and an activity that names them without expecting anything of them, as a member or a recipient rather than as an assignee, someone mentioned or an invitee, wake nobody: their brief tells them. An owner chooses what their assistant listens to: Calendar and Tasks by default, Mail from their yes to their first brief's question, and Drive once they ask. Mail and Drive publish nothing the harness takes yet, so listening there only puts them in the brief.
