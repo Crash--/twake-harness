@@ -571,23 +571,53 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// The suggestions read the messages with words: in a listened conversation, for its owner alone,
 	// with the room's other person, read in the room whether they wrote the message or not, so a
 	// silent member is still the one invited; a member of another server has no address and nothing
-	// is proposed
+	// is proposed. The messages of a listened conversation come to them in the turn of their room,
+	// see beginSuggestions: here are the channels' alone.
 	const suggesting: Subscriber = {
 		name: 'suggestions',
 		message: async (message, assistant) => {
-			if (message.text === null) return;
+			if (message.text === null || assistant !== null) return;
 			const { sender, eventId, text } = message;
-			const channelMessage = { sender, eventId, text };
-			if (assistant === null) {
-				await suggestions.onMessage(message.roomId, channelMessage);
-				return;
-			}
-			const other = await otherMemberPrincipal(message.roomId, assistant.userId, assistant.owner);
-			if (other !== null) {
-				await suggestions.onMessage(message.roomId, channelMessage, assistant.owner, other);
-			}
+			await suggestions.onMessage(message.roomId, { sender, eventId, text });
 		}
 	};
+
+	// What the suggestions take of a message of a listened conversation, in the turn of its room, for
+	// each assistant that reads it, one after the other: the room's other person is read, then the
+	// intake is handed the message, which holds it at once as the context of the next one. What the
+	// intake goes on with takes as long as it takes, and is left to the caller, which awaits the
+	// promise kept here for each assistant, by its user id. A read that fails is logged as the
+	// suggestions' failure, and the next assistant's goes on.
+	async function beginSuggestions(
+		message: ReadMessage | null,
+		assistants: readonly ReadingAssistant[]
+	): Promise<Map<string, Promise<void>>> {
+		const intakes = new Map<string, Promise<void>>();
+		if (message === null || message.text === null) return intakes;
+		const { roomId, eventId, sender, text } = message;
+		for (const assistant of assistants) {
+			try {
+				const other = await otherMemberPrincipal(roomId, assistant.userId, assistant.owner);
+				if (other === null) continue;
+				const intake = suggestions.onMessage(
+					roomId,
+					{ sender, eventId, text },
+					assistant.owner,
+					other
+				);
+				// Its failure is logged where it is awaited, and is no unhandled rejection until then
+				void intake.catch(() => undefined);
+				intakes.set(assistant.userId, intake);
+			} catch (err: unknown) {
+				log.error(
+					{ roomId, eventId, sender, subscriber: suggesting.name, err },
+					'room message failed'
+				);
+			}
+		}
+		return intakes;
+	}
+
 	// The owner was seen in their assistant's room: a message of theirs there, or a read receipt.
 	// Only the instant the role received it is kept, and only for the room their brief goes to. A
 	// failure costs their brief a sighting of them, and their message nothing.
@@ -628,14 +658,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 		}
 	}
+	// A message of a listened conversation is handed to the suggestions by beginSuggestions, in the
+	// turn of its room: what that began for this assistant, its `intake`, is awaited here in their place
 	async function handMessage(
 		message: ReadMessage | null,
-		assistant: ReadingAssistant | null
+		assistant: ReadingAssistant | null,
+		intake?: Promise<void>
 	): Promise<void> {
 		if (message === null) return;
 		const { roomId, eventId, sender } = message;
 		await toEachSubscriber('room message', { roomId, eventId, sender }, (subscriber) =>
-			subscriber.message?.(message, assistant)
+			subscriber === suggesting && assistant !== null
+				? intake
+				: subscriber.message?.(message, assistant)
 		);
 	}
 
@@ -1148,7 +1183,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// The checks of a listened conversation run one at a time, each on what the one before left,
 	// and a message of the room reads its rows after the checks registered before it: the SDK emits
 	// a transaction's events without awaiting their listeners, so the words of a newcomer could be
-	// read while their coming was being checked. A check registers before its first wait.
+	// read while their coming was being checked. The same turn orders the reads a message makes of
+	// the room, one for each assistant that reads it, up to the moment the suggestions take it in:
+	// they hold each message as the context of the next, so the one whose read answered first would
+	// come before the other. A check and a message register before their first wait.
 	const roomChecks = makeTurnGate();
 
 	// An assistant or the listener: neither is asked for a yes, whatever it does in a room
@@ -1704,12 +1742,21 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		// Null for a message without words, as an image or a file, which only the creator reads
 		const text = textOf(raw);
-		// Whoever came in before this message is checked first: a room left meanwhile is read no more
-		const listened = await roomChecks.run(roomId, () => listenedRooms(roomId));
-		if (listened.length > 0) {
+		// Whoever came in before this message is checked first: a room left meanwhile is read no more.
+		// The message of a listened conversation is begun in that turn, for the suggestions of each
+		// assistant that reads it, and handed on once the turn is over: the rest of what is done with
+		// it never holds the room's next message, nor its next check
+		const begun = await roomChecks.run(roomId, async () => {
+			const assistants = await listenedRooms(roomId);
+			if (assistants.length === 0) return null;
 			// Never a turn there: what one of its assistants reads is for that owner alone
 			const message = messageOf(roomId, raw, receivedAt);
-			for (const assistant of listened) await handMessage(message, assistant);
+			return { assistants, message, intakes: await beginSuggestions(message, assistants) };
+		});
+		if (begun !== null) {
+			for (const assistant of begun.assistants) {
+				await handMessage(begun.message, assistant, begun.intakes.get(assistant.userId));
+			}
 			return;
 		}
 		const room = await assistantRoom(roomId);

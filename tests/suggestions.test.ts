@@ -5,6 +5,7 @@ import { dateIn, describeMoment, instantIn, isoIn } from '../src/agent/clock.js'
 import { listActivitiesSince, purgeActivities } from '../src/journal/repository.js';
 import { activityView } from '../src/journal/tool.js';
 import { buildRegistration } from '../src/matrix/registration.js';
+import type { Subscriber } from '../src/matrix/subscribers.js';
 import {
 	AVAILABILITY_REQUEST_TYPE,
 	AVAILABILITY_SOURCE
@@ -123,6 +124,21 @@ describe('the assistant proposes from the messages of channels', () => {
 	const resetMoment = (): void => {
 		moment = null;
 	};
+	// A subscriber of the matrix role that is slow with the messages of one room while a test has it
+	// so: it records their words as it gets them, and goes on once `released` settles
+	let slow: {
+		readonly room: string;
+		readonly released: Promise<void>;
+		readonly texts: string[];
+	} | null = null;
+	const slowSubscriber: Subscriber = {
+		name: 'slow',
+		message: async (message) => {
+			if (slow?.room !== message.roomId) return;
+			slow.texts.push(message.text ?? '');
+			await slow.released;
+		}
+	};
 	const users = new Map<string, MatrixUser>();
 	let alice: MatrixUser;
 	let bob: MatrixUser;
@@ -222,6 +238,7 @@ describe('the assistant proposes from the messages of channels', () => {
 		space = await startFakeSpace();
 		h = await startMatrixHarness({
 			clock,
+			subscribers: [slowSubscriber],
 			env: {
 				SUGGESTIONS_ENABLED: 'true',
 				SPACE_API_URL: space.url,
@@ -2818,6 +2835,92 @@ describe('the assistant proposes from the messages of channels', () => {
 				}
 			} finally {
 				await p.stop();
+			}
+		});
+
+		// What the model was shown once it was asked about a message with these words, among the calls
+		// made since `since`
+		const shownAbout = (since: number, words: string): string | undefined =>
+			h.apisix.llm.calls
+				.slice(since)
+				.map((call) => call.request.messages.at(-1)?.content ?? '')
+				.find((shown) => shown.includes('<<<channel-messages') && shown.includes(words));
+
+		it('hands the messages of a listened conversation on in the order they arrived, whatever each read of the room takes', async () => {
+			const c = await listenedConversation();
+			// The homeserver is slow to answer the read of the room that the first message makes, and
+			// answers the second's at once
+			let release = (): void => undefined;
+			const released = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let reads = 0;
+			try {
+				// Each owner's assistant has no room of its own, so it answers none itself rather than
+				// ask its owner: set under each principal, since the assistants table is theirs alone
+				for (const who of [c.ownerPrincipal, c.otherPrincipal]) {
+					await withPrincipal(
+						h.db,
+						{ id: who },
+						(tx) => tx.sql`update assistants set room_id = null where owner = ${who}`
+					);
+				}
+				const llmBefore = h.apisix.llm.calls.length;
+				h.apisix.matrixHold = (call) => {
+					const bare = decodeURIComponent(call.path).split('?')[0] ?? '';
+					if (call.method !== 'GET' || !bare.endsWith(`/rooms/${c.room}/state`)) return null;
+					reads += 1;
+					return reads === 1 ? released : null;
+				};
+				await c.otherClient.sendText(c.room, 'bonjour');
+				// The second is sent once the first waits for its read, so it cannot reach the role before it
+				await until(() => (reads > 0 ? true : null));
+				await c.otherClient.sendText(c.room, 'ok on parle lundi à 10h');
+				// A role that reads the second message ahead of the first has asked the model about it by now
+				await sleep(3000);
+				release();
+
+				// The message before the one that matched is its context, whichever read answered first
+				const shown = await until(() => shownAbout(llmBefore, 'ok on parle lundi'));
+				expect(shown).toContain('bonjour');
+				expect(reads).toBe(2);
+			} finally {
+				h.apisix.matrixHold = null;
+				release();
+				await c.stop();
+			}
+		});
+
+		it('hands a message of a listened conversation on while a subscriber is still busy with the one before', async () => {
+			const c = await listenedConversation();
+			let release = (): void => undefined;
+			const released = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const texts: string[] = [];
+			slow = { room: c.room, released, texts };
+			try {
+				for (const who of [c.ownerPrincipal, c.otherPrincipal]) {
+					await withPrincipal(
+						h.db,
+						{ id: who },
+						(tx) => tx.sql`update assistants set room_id = null where owner = ${who}`
+					);
+				}
+				const llmBefore = h.apisix.llm.calls.length;
+				await c.otherClient.sendText(c.room, 'bonjour');
+				// The second is sent once the subscriber has the first, so it cannot reach the role before it
+				await until(() => (texts.includes('bonjour') ? true : null));
+				await c.otherClient.sendText(c.room, 'ok on parle lundi à 10h');
+
+				// The model is asked about the second message, with the first as its context, while the
+				// subscriber, which comes after the suggestions, is still busy with the first
+				const shown = await until(() => shownAbout(llmBefore, 'ok on parle lundi'), 20_000);
+				expect(shown).toContain('bonjour');
+			} finally {
+				slow = null;
+				release();
+				await c.stop();
 			}
 		});
 
