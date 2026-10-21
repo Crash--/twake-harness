@@ -32,12 +32,19 @@ import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { quietHoursOf } from '../quiet/hours.js';
 import { findOwnerSettings } from '../settings/repository.js';
 import { isListening } from '../sources/repository.js';
-import { sourceOfActivity } from '../sources/sources.js';
+import {
+	CHAT_SOURCE,
+	sourceOfActivity,
+	sourceRegistryOf,
+	type Source,
+	type SourceRegistry
+} from '../sources/sources.js';
 import {
 	CANCELLED_EVENT_TYPE,
 	COUNTERED_EVENT_TYPE,
 	MOVED_EVENT_TYPE,
-	TASK_ASSIGNED_EVENT_TYPE
+	TASK_ASSIGNED_EVENT_TYPE,
+	UNREAD_MENTION_EVENT_TYPE
 } from './event-types.js';
 import {
 	eraseHeldActivities,
@@ -127,6 +134,9 @@ function eventData(wakeup: Wakeup): string {
 // a move, a cancellation or a counter-proposal.
 function told(wakeup: Wakeup, messages: Messages): string {
 	if (wakeup.brief !== undefined) return messages.brief.intro(wakeup.id);
+	if (wakeup.source === CHAT_SOURCE && wakeup.type === UNREAD_MENTION_EVENT_TYPE) {
+		return messages.events.unreadMentions(wakeup.id, eventData(wakeup));
+	}
 	if (carriesInvitation(wakeup)) {
 		const kind = TOLD_OF_MEETING.get(wakeup.type);
 		return kind === undefined
@@ -228,6 +238,115 @@ async function closeRequestsOfCancelledMeeting(
 		: supersedeInvitationRequests(tx, owner, wakeup.invitation.uid, INVITATION_ANSWERS);
 }
 
+// What wake() makes of a wake-up before any transaction: the owner it is for, whether it is their
+// own action or an activity, and the application it comes from
+interface Addressee {
+	readonly owner: string;
+	readonly ownAction: boolean;
+	readonly isActivity: boolean;
+	readonly application: Source | null;
+	readonly sources: SourceRegistry;
+}
+
+// The owner a wake-up is for, the recipient by their email, which is their principal, or null for
+// one that is ignored: only a person of the instance's mail domain has one, and nobody is woken
+// for their own action
+function addresseeOf(config: Config, wakeup: Wakeup): Addressee | null {
+	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
+	if (owner === null || matrixLocalpartOfPrincipal(config, owner) === null) return null;
+	// Of the owner's own actions, only a task they assigned themselves, or that their assistant
+	// assigned them on their yes, as them, is noted
+	const ownAction = isOwnAction(wakeup);
+	if (ownAction && wakeup.type !== TASK_ASSIGNED_EVENT_TYPE) return null;
+	// A brief comes from the scheduler's source, and that source brings nothing else: an event
+	// published under it is nobody's brief, and takes none of their wake-ups
+	if ((wakeup.source === BRIEF_SOURCE) !== (wakeup.brief !== undefined)) return null;
+	// A brief is no activity: the journal notes the others alone
+	const isActivity = wakeup.brief === undefined;
+	// The application an activity comes from, by the source it was published under: one the
+	// harness does not know, or the deployment closed, is listened to by nobody
+	const sources = sourceRegistryOf(config);
+	const application = isActivity ? sourceOfActivity(sources, wakeup.source) : null;
+	return { owner, ownAction, isActivity, application, sources };
+}
+
+// Takes a wake-up for its owner, in the transaction given under their principal, and gives what
+// came of it, with the requests a meeting's cancellation closed added to `closed`
+async function take(
+	tx: Tx,
+	deps: WakeDeps,
+	wakeup: Wakeup,
+	addressee: Addressee,
+	closed: ClosedRequest[]
+): Promise<WakeOutcome> {
+	const { config } = deps;
+	const { owner, ownAction, isActivity, application, sources } = addressee;
+	const assistant = await findAssistant(tx, owner);
+	if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
+		return 'no_assistant';
+	}
+	// What the owner does not have their assistant listen to reaches neither their room nor
+	// their journal, and takes none of their wake-ups
+	if (
+		isActivity &&
+		(application === null || !(await isListening(tx, owner, application, sources)))
+	) {
+		return 'unlistened';
+	}
+	// One wake-up of an owner at a time, whatever source it comes from: what woke them is settled
+	// when it is read, and no two events take the last wake-up of their hour
+	await tx.sql`select pg_advisory_xact_lock(hashtext(${`wakeups:${owner}`}))`;
+	const [prior] = await tx.sql<{ seen: boolean; woken: number }[]>`
+		select
+			exists (
+				select 1 from wakeups
+				where source = ${wakeup.source} and event_id = ${wakeup.id} and owner = ${owner}
+			) as seen,
+			(
+				select count(*)::int from wakeups
+				where owner = ${owner} and woken_at > now() - interval '1 hour'
+			) as woken`;
+	// An owner the event already woke, or whose journal noted it, is not woken again
+	if (prior?.seen === true || (await wasNoted(tx, owner, wakeup.source, wakeup.id))) {
+		return 'duplicate';
+	}
+	// A cancelled meeting has nothing left to answer, whether its owner is told of it now, after
+	// their quiet hours or never, past their cap
+	closed.push(...(await closeRequestsOfCancelledMeeting(tx, wakeup, owner)));
+	const noteAs = (journaled: ActivityOutcome): Promise<void> =>
+		noteActivity(tx, owner, {
+			source: wakeup.source,
+			eventId: wakeup.id,
+			type: wakeup.type,
+			receivedAt: deps.clock.now(),
+			outcome: journaled,
+			noted: wakeup.noted ?? { ids: NOTHING_SHOWN, names: NOTHING_SHOWN }
+		});
+	// A task the owner assigned themselves, or an activity its source keeps for their brief, calls
+	// for no word at once and takes none of their wake-ups: their journal keeps it for their brief
+	if (ownAction || wakeup.forBrief === true) {
+		await noteAs('for_brief');
+		return 'for_brief';
+	}
+	// Nor during their quiet hours, unless it is about a meeting that starts before they come out
+	// of them: it waits for their brief, or their end, with what its turn will need
+	const held = isActivity ? await heldUntil(tx, deps, owner, wakeup) : null;
+	if (held !== null) {
+		await holdActivity(tx, owner, wakeup, deps.clock.now(), held.releaseAt);
+		await noteAs('quiet_hours');
+		return 'quiet_hours';
+	}
+	// Nor past their hourly cap: a burst of events, a mass assignment or what piled up during an
+	// outage, drowns neither their room nor their quota
+	if ((prior?.woken ?? 0) >= config.wakeups.perHour) {
+		if (isActivity) await noteAs('capped');
+		return 'capped';
+	}
+	if (isActivity) await noteAs('woken');
+	await queueTurn(tx, wakeup, owner, assistant.roomId, localeOf(assistant, config.locale));
+	return 'woken';
+}
+
 // Wakes the assistant of the person a wake-up is for, its owner: a turn of origin event in their
 // room, serialized with their other turns, which tells them of the event it carries, or of origin
 // brief for the brief the scheduler asks for. The owner is
@@ -245,85 +364,66 @@ export async function wake(
 	wakeup: Wakeup,
 	options: WakeOptions = {}
 ): Promise<WakeOutcome> {
-	const { config, db } = deps;
-	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
-	if (owner === null || matrixLocalpartOfPrincipal(config, owner) === null) return 'ignored';
-	// Of the owner's own actions, only a task they assigned themselves, or that their assistant
-	// assigned them on their yes, as them, is noted
-	const ownAction = isOwnAction(wakeup);
-	if (ownAction && wakeup.type !== TASK_ASSIGNED_EVENT_TYPE) return 'ignored';
-	// A brief comes from the scheduler's source, and that source brings nothing else: an event
-	// published under it is nobody's brief, and takes none of their wake-ups
-	if ((wakeup.source === BRIEF_SOURCE) !== (wakeup.brief !== undefined)) return 'ignored';
-	// A brief is no activity: the journal notes the others alone
-	const isActivity = wakeup.brief === undefined;
-	// The application an activity comes from, by the source it was published under: one the
-	// harness does not know is listened to by nobody
-	const application = isActivity ? sourceOfActivity(wakeup.source) : null;
+	const addressee = addresseeOf(deps.config, wakeup);
+	if (addressee === null) return 'ignored';
 	const closed: ClosedRequest[] = [];
-	const outcome = await withPrincipal(db, { id: owner }, async (tx) => {
-		const assistant = await findAssistant(tx, owner);
-		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
-			return 'no_assistant' as const;
-		}
-		// What the owner does not have their assistant listen to reaches neither their room nor
-		// their journal, and takes none of their wake-ups
-		if (isActivity && (application === null || !(await isListening(tx, owner, application)))) {
-			return 'unlistened' as const;
-		}
-		// One wake-up of an owner at a time, whatever source it comes from: what woke them is settled
-		// when it is read, and no two events take the last wake-up of their hour
+	const outcome = await withPrincipal(deps.db, { id: addressee.owner }, (tx) =>
+		take(tx, deps, wakeup, addressee, closed)
+	);
+	logTaken(deps, wakeup, addressee, outcome, closed, options);
+	return outcome;
+}
+
+// A wake-up its caller reads under the lock of its owner's wake-ups, and what settles it in the
+// same transaction, whatever came of it
+export interface Carried {
+	readonly wakeup: Wakeup;
+	settle(tx: Tx, outcome: WakeOutcome): Promise<void>;
+}
+
+// Wakes an owner's assistant for the wake-ups `read` gives, as wake() takes each, in one
+// transaction under the lock of their wake-ups, where each is read and settled: a pass on another
+// replica reads none of them until it is over. One for anybody else is ignored. Gives what came of
+// each, in order.
+export async function wakeFor(
+	deps: WakeDeps,
+	owner: string,
+	read: (tx: Tx) => Promise<readonly Carried[]>
+): Promise<WakeOutcome[]> {
+	const taken = await withPrincipal(deps.db, { id: owner }, async (tx) => {
 		await tx.sql`select pg_advisory_xact_lock(hashtext(${`wakeups:${owner}`}))`;
-		const [prior] = await tx.sql<{ seen: boolean; woken: number }[]>`
-			select
-				exists (
-					select 1 from wakeups
-					where source = ${wakeup.source} and event_id = ${wakeup.id} and owner = ${owner}
-				) as seen,
-				(
-					select count(*)::int from wakeups
-					where owner = ${owner} and woken_at > now() - interval '1 hour'
-				) as woken`;
-		// An owner the event already woke, or whose journal noted it, is not woken again
-		if (prior?.seen === true || (await wasNoted(tx, owner, wakeup.source, wakeup.id))) {
-			return 'duplicate' as const;
+		const results: {
+			wakeup: Wakeup;
+			addressee: Addressee | null;
+			outcome: WakeOutcome;
+			closed: ClosedRequest[];
+		}[] = [];
+		for (const { wakeup, settle } of await read(tx)) {
+			const addressee = addresseeOf(deps.config, wakeup);
+			const closed: ClosedRequest[] = [];
+			const outcome =
+				addressee?.owner === owner ? await take(tx, deps, wakeup, addressee, closed) : 'ignored';
+			await settle(tx, outcome);
+			results.push({ wakeup, addressee, outcome, closed });
 		}
-		// A cancelled meeting has nothing left to answer, whether its owner is told of it now, after
-		// their quiet hours or never, past their cap
-		closed.push(...(await closeRequestsOfCancelledMeeting(tx, wakeup, owner)));
-		const noteAs = (journaled: ActivityOutcome): Promise<void> =>
-			noteActivity(tx, owner, {
-				source: wakeup.source,
-				eventId: wakeup.id,
-				type: wakeup.type,
-				receivedAt: deps.clock.now(),
-				outcome: journaled,
-				noted: wakeup.noted ?? { ids: NOTHING_SHOWN, names: NOTHING_SHOWN }
-			});
-		// A task the owner assigned themselves, or an activity its source keeps for their brief, calls
-		// for no word at once and takes none of their wake-ups: their journal keeps it for their brief
-		if (ownAction || wakeup.forBrief === true) {
-			await noteAs('for_brief');
-			return 'for_brief' as const;
-		}
-		// Nor during their quiet hours, unless it is about a meeting that starts before they come out
-		// of them: it waits for their brief, or their end, with what its turn will need
-		const held = isActivity ? await heldUntil(tx, deps, owner, wakeup) : null;
-		if (held !== null) {
-			await holdActivity(tx, owner, wakeup, deps.clock.now(), held.releaseAt);
-			await noteAs('quiet_hours');
-			return 'quiet_hours' as const;
-		}
-		// Nor past their hourly cap: a burst of events, a mass assignment or what piled up during an
-		// outage, drowns neither their room nor their quota
-		if ((prior?.woken ?? 0) >= config.wakeups.perHour) {
-			if (isActivity) await noteAs('capped');
-			return 'capped' as const;
-		}
-		if (isActivity) await noteAs('woken');
-		await queueTurn(tx, wakeup, owner, assistant.roomId, localeOf(assistant, config.locale));
-		return 'woken' as const;
+		return results;
 	});
+	for (const { wakeup, addressee, outcome, closed } of taken) {
+		if (addressee !== null) logTaken(deps, wakeup, addressee, outcome, closed, {});
+	}
+	return taken.map(({ outcome }) => outcome);
+}
+
+// What is logged of what came of a wake-up, once its transaction is over
+function logTaken(
+	deps: WakeDeps,
+	wakeup: Wakeup,
+	addressee: Addressee,
+	outcome: WakeOutcome,
+	closed: readonly ClosedRequest[],
+	options: WakeOptions
+): void {
+	const { owner, application, isActivity } = addressee;
 	const logged = { source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner };
 	if (outcome === 'woken') deps.log.info(logged, 'event queued');
 	for (const request of closed) {
@@ -344,7 +444,6 @@ export async function wake(
 	) {
 		deps.log.info({ ...logged, outcome }, 'activity noted');
 	}
-	return outcome;
 }
 
 // The brief its owner asks for in their turn takes the wake-up of its date, as a pass's would, so
@@ -364,6 +463,7 @@ export async function takeBriefWakeup(tx: Tx, owner: string, id: string): Promis
 export async function releaseHeld(deps: WakeDeps, owner: string): Promise<number> {
 	const { config, db, clock } = deps;
 	const now = clock.now();
+	const sources = sourceRegistryOf(config);
 	const woken = await withPrincipal(db, { id: owner }, async (tx) => {
 		if (!(await hasReleasedActivities(tx, owner, now))) return [];
 		// One wake-up of an owner at a time, as wake() takes them
@@ -382,8 +482,10 @@ export async function releaseHeld(deps: WakeDeps, owner: string): Promise<number
 		for (const wakeup of released) {
 			await eraseHeldActivities(tx, owner, [{ source: wakeup.source, eventId: wakeup.id }]);
 			if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) continue;
-			const application = sourceOfActivity(wakeup.source);
-			if (application === null || !(await isListening(tx, owner, application))) continue;
+			const application = sourceOfActivity(sources, wakeup.source);
+			if (application === null || !(await isListening(tx, owner, application, sources))) {
+				continue;
+			}
 			await noteReleased(tx, owner, wakeup.source, wakeup.id);
 			await queueTurn(tx, wakeup, owner, assistant.roomId, localeOf(assistant, config.locale));
 			queued.push(wakeup);

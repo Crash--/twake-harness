@@ -65,6 +65,7 @@ import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js'
 import { makeConsentRequests } from './consent-requests.js';
 import { isBriefMarker, markBrief, type BriefMarker } from './brief.js';
 import { makeLaidOutText, makeRichText } from './format.js';
+import { makeMentionIntake } from '../mentions/intake.js';
 import {
 	isPendingIdentityQuestion,
 	makeIdentityQuestions,
@@ -610,7 +611,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	};
 
-	const subscribers = [suggesting, seeing, ...(options.subscribers ?? [])];
+	// The mentions of the owners in the channels the listener is in, which wake their assistant once
+	// they leave them unread (see docs/events.md), the room read as the listener reads it
+	const mentions = makeMentionIntake({
+		config,
+		db,
+		log,
+		roomState: async (roomId) =>
+			(await appservice
+				.getIntentForUserId(listenerUserId(config))
+				.underlyingClient.getRoomState(roomId)) as RoomEvent[]
+	});
+
+	const subscribers = [suggesting, seeing, mentions, ...(options.subscribers ?? [])];
 	// Hands what the role read to each of its subscribers in turn. One that fails keeps it from none
 	// of the others, and is logged as the role logs a failure of its own, by what it was handling,
 	// with the subscriber's name and the ids of what it was handed, never its content.

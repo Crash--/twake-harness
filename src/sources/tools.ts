@@ -18,15 +18,18 @@ import { labelOf, type DomainDescriptions } from '../contracts/domains.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
+import { listenerName } from '../suggestions/listener.js';
 import { listListened, saveListening } from './repository.js';
 import {
 	isListenable,
 	isSource,
-	LISTENABLE,
+	listenableOf,
 	listeningSaid,
 	readDomainOf,
+	sourceName,
 	SOURCES,
-	type Source
+	type Source,
+	type SourceRegistry
 } from './sources.js';
 
 export const LISTEN_TOOL = 'listen_to_source';
@@ -51,6 +54,8 @@ export interface ListeningToolsDeps {
 	readonly consentMetrics: ConsentMetrics;
 	// How the catalog names the applications to their owners, as it last loaded
 	readonly domains: () => DomainDescriptions;
+	// The sources as the deployment has them
+	readonly sources: SourceRegistry;
 }
 
 const sourceArgs = z.object({ source: z.string() });
@@ -72,20 +77,33 @@ const SOURCE_PARAMETERS = {
 
 // What the model reads when the owner names a source their assistant cannot listen to: one it may
 // not listen to yet, or one the harness does not know
-function notListenable(named: string): ToolOutcome {
+function notListenable(named: string, listenable: readonly Source[]): ToolOutcome {
 	return {
 		result: {
 			success: false,
 			error: isSource(named) ? 'not yet possible' : 'unknown source',
-			listenable: LISTENABLE
+			listenable
 		}
 	};
+}
+
+// The sources listed as a sentence says them: "calendar, tasks and mail"
+function listed(sources: readonly Source[]): string {
+	const last = sources.at(-1);
+	if (last === undefined || sources.length === 1) return last ?? '';
+	return `${sources.slice(0, -1).join(', ')} and ${last}`;
 }
 
 // The tools by which the owner turns the sources their assistant listens to on and off, and learns
 // which it listens to
 export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 	const { config } = deps;
+	const listenable = listenableOf(deps.sources);
+	// Of the Chat, where the deployment opened it, the mentions the owner leaves unread wake their
+	// assistant, and the model is told so
+	const chat = listenable.includes('chat')
+		? ' Listening to their chat wakes you for a mention of them they leave unread for ten minutes.'
+		: '';
 
 	// Keeps the owner's choice, and ends the turn on the harness's own words that confirm it, which
 	// name the application as the catalog does, in their language
@@ -100,10 +118,10 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 		);
 		context.log.info({ source, listening }, 'listened source set');
 		const locale = await fetchOwnerLocale(context.db, owner, config.locale);
-		const { name } = labelOf(deps.domains(), source, 'read', locale, config.locale);
+		const name = sourceName(deps.domains(), source, locale, config.locale);
 		return {
 			result: { success: true, source, listening },
-			final: listeningSaid(getMessages(locale), source, name, listening)
+			final: listeningSaid(getMessages(locale), source, name, listening, listenerName(config))
 		};
 	}
 
@@ -170,8 +188,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			type: 'function',
 			function: {
 				name: LISTEN_TOOL,
-				description:
-					'Start listening to one of the user\'s applications when they ask you to, such as "listen to my calendar": what arrives for them there wakes you, and you tell them of it, but for their mail and their drive, which only their brief tells them of. Only calendar, tasks, mail and drive can be listened to for now. If they have not let you read that application yet, the harness asks them first, and listening starts on their yes.',
+				description: `Start listening to one of the user's applications when they ask you to, such as "listen to my calendar": what arrives for them there wakes you, and you tell them of it, but for their mail and their drive, which only their brief tells them of.${chat} Only ${listed(listenable)} can be listened to for now. If they have not let you read that application yet, the harness asks them first, and listening starts on their yes.`,
 				parameters: SOURCE_PARAMETERS
 			}
 		},
@@ -184,7 +201,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 				return { result: ACCESS_DENIED, denied: true };
 			}
 			const named = namedSource(args);
-			if (!isListenable(named)) return notListenable(named);
+			if (!isListenable(deps.sources, named)) return notListenable(named, listenable);
 			const owner = context.principalId;
 			// Listening that reads nothing through a contract asks nothing first
 			const reads = readDomainOf(named);
@@ -209,8 +226,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			type: 'function',
 			function: {
 				name: STOP_LISTENING_TOOL,
-				description:
-					'Stop listening to one of the user\'s applications when they ask you to, such as "stop listening to my calendar": what arrives for them there no longer wakes you, nor does their brief tell them of it, and you can still read it when they ask. Only calendar, tasks, mail and drive can be turned off for now.',
+				description: `Stop listening to one of the user's applications when they ask you to, such as "stop listening to my calendar": what arrives for them there no longer wakes you, nor does their brief tell them of it, and you can still read it when they ask. Only ${listed(listenable)} can be turned off for now.`,
 				parameters: SOURCE_PARAMETERS
 			}
 		},
@@ -221,7 +237,9 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 				return { result: ACCESS_DENIED, denied: true };
 			}
 			const named = namedSource(args);
-			return isListenable(named) ? keep(context, named, false) : notListenable(named);
+			return isListenable(deps.sources, named)
+				? keep(context, named, false)
+				: notListenable(named, listenable);
 		}
 	};
 
@@ -241,13 +259,13 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			const owner = context.principalId;
 			if (owner === ORGANIZATION_PRINCIPAL) return { result: ACCESS_DENIED, denied: true };
 			const sources = await withPrincipal(context.db, { id: owner }, (tx) =>
-				listListened(tx, owner)
+				listListened(tx, owner, deps.sources)
 			);
 			return {
 				result: {
 					listened: sources,
-					not_listened: LISTENABLE.filter((source) => !sources.includes(source)),
-					not_yet_possible: SOURCES.filter((source) => !LISTENABLE.includes(source))
+					not_listened: listenable.filter((source) => !sources.includes(source)),
+					not_yet_possible: SOURCES.filter((source) => !listenable.includes(source))
 				}
 			};
 		}

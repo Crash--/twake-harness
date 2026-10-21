@@ -57,6 +57,47 @@ describe('the settings of the suggestions', () => {
 	});
 });
 
+describe('the settings of the Chat mentions', () => {
+	const base = {
+		DATABASE_URL: 'postgres://x@localhost/x',
+		AUTH_JWKS_URL: 'https://example.test/jwks',
+		AUTH_ISSUER: 'https://example.test/',
+		AUTH_AUDIENCE: 'twake-harness',
+		APISIX_BASE_URL: 'http://apisix.test',
+		APISIX_CONSUMER_KEY: 'k'
+	};
+	const matrix = {
+		...base,
+		HARNESS_ROLE: 'matrix',
+		MATRIX_SERVER_NAME: 'test.local',
+		MATRIX_HS_TOKEN: 'hs'
+	};
+
+	it('are off unless the deployment turns them on', () => {
+		expect(loadConfig(base).chatMentions.enabled).toBe(false);
+		expect(loadConfig({ ...base, CHAT_MENTIONS_ENABLED: 'true' }).chatMentions.enabled).toBe(true);
+	});
+
+	it('refuse, at startup, a matrix role whose listener is not registered to hear the channels', () => {
+		expect(() => loadConfig({ ...matrix, CHAT_MENTIONS_ENABLED: 'true' })).toThrow(
+			'invalid configuration: CHAT_MENTIONS_ENABLED needs SUGGESTIONS_ENABLED on the matrix role, whose listener hears the channels'
+		);
+		expect(
+			loadConfig({ ...matrix, CHAT_MENTIONS_ENABLED: 'true', SUGGESTIONS_ENABLED: 'true' })
+				.chatMentions.enabled
+		).toBe(true);
+	});
+
+	it('start the roles that hear no channel without the suggestions', () => {
+		for (const role of ['api', 'worker']) {
+			expect(
+				loadConfig({ ...base, HARNESS_ROLE: role, CHAT_MENTIONS_ENABLED: 'true' }).chatMentions
+					.enabled
+			).toBe(true);
+		}
+	});
+});
+
 describe('the tracing of a turn', () => {
 	it('refuses, at startup, to send the turns to LangSmith', () => {
 		const base = {

@@ -7,6 +7,7 @@ import {
 	listActiveAssistants
 } from '../assistants/repository.js';
 import { withPrincipal } from '../db/client.js';
+import { wakeForMentions } from '../mentions/wake.js';
 import { BRIEF_EVENT_TYPE } from '../wakeups/event-types.js';
 import { BRIEF_SOURCE, releaseHeld, wake, type WakeDeps } from '../wakeups/wake.js';
 import { BRIEF_WINDOW_MINUTES, fetchBriefSettings, isBriefDate } from './settings.js';
@@ -81,9 +82,10 @@ async function briefOwner(deps: WakeDeps, owner: string, settled: SettledBriefs)
 }
 
 // One pass over the owners whose assistant is in its room, one after the other: their brief, when
-// BRIEF_ENABLED is on, then what their quiet hours held that is due to wake them. An owner whose
-// brief could not be looked at, or what their quiet hours held, is skipped with a warning, and the
-// pass goes on with the next one. A pass told to stop stops before the next owner.
+// BRIEF_ENABLED is on, then what their quiet hours held that is due to wake them, then the mentions
+// of them that waited unread long enough. An owner whose brief could not be looked at, what their
+// quiet hours held, or their mentions, is skipped with a warning, and the pass goes on with the next
+// one. A pass told to stop stops before the next owner.
 export async function runBriefPass(
 	deps: WakeDeps,
 	settled: SettledBriefs = new Map(),
@@ -104,6 +106,11 @@ export async function runBriefPass(
 		} catch (err: unknown) {
 			deps.log.warn({ owner, err }, 'quiet hours release failed');
 		}
+		try {
+			await wakeForMentions(deps, owner);
+		} catch (err: unknown) {
+			deps.log.warn({ owner, err }, 'mentions wake failed');
+		}
 	}
 }
 
@@ -116,7 +123,8 @@ export interface BriefScheduler {
 // days and from the time they chose, Monday to Friday from eight unless they chose others, on the
 // wall clock of their calendar's zone, the deployment's until a read of it named one. Kept by owner
 // and date, as any wake-up, a brief goes out once, whether a pass runs again after a restart or on
-// another replica. On or off, what each owner's quiet hours held wakes their assistant once due.
+// another replica. On or off, what each owner's quiet hours held wakes their assistant once due, as
+// do the mentions of them they leave unread.
 export function startBriefScheduler(deps: WakeDeps, checkMs: number): BriefScheduler {
 	if (!deps.config.brief.enabled) {
 		deps.log.info({ setting: 'BRIEF_ENABLED' }, 'morning briefs off');

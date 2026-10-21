@@ -35,3 +35,7 @@ export type MeetingScope = (typeof MEETING_SCOPES)[number];
 // The type of the wake-up by which the worker role's scheduler asks an owner's assistant for the
 // brief of their working day: the harness's own, which no source publishes
 export const BRIEF_EVENT_TYPE = 'com.twake.harness.brief.v1';
+
+// The type of the wake-up by which the worker role's pass tells an owner's assistant of the
+// mentions of them they left unread in a room of the Chat: the harness's own too
+export const UNREAD_MENTION_EVENT_TYPE = 'com.twake.chat.mention.unread.v1';

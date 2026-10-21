@@ -1445,7 +1445,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 
 	// The applications of the brief the owner's assistant listens to, which alone it reads
 	async function listenedBy(owner: string): Promise<Source[]> {
-		const listened = await withPrincipal(db, { id: owner }, (tx) => listListened(tx, owner));
+		const listened = await withPrincipal(db, { id: owner }, (tx) =>
+			listListened(tx, owner, deps.sources)
+		);
 		return READ_SOURCES.filter((source) => listened.includes(source));
 	}
 

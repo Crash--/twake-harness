@@ -38,7 +38,7 @@ import {
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { acceptSourceOffer, type OfferAccepted, type OfferAnswer } from '../sources/offers.js';
-import { SOURCE_REGISTRY, type SourceRegistry } from '../sources/sources.js';
+import { sourceRegistryOf, type SourceRegistry } from '../sources/sources.js';
 import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
 import {
 	CANCELLED_EVENT_TYPE,
@@ -395,6 +395,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const decisionLlm = makeDecisionClient(config.apisix, config.llm.decisionModel);
 	const { consentMetrics } = deps;
 	const contracts = makeContractCatalog({ config, log: deps.log, consentMetrics });
+	// The sources the owner may have their assistant listen to, and the one a brief may offer after
+	// it, which the owner's yes answers
+	const sources = deps.sources ?? sourceRegistryOf(config);
 	const tools = makeToolRegistry(
 		[
 			clarifyTool,
@@ -417,7 +420,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			...makeListeningTools({
 				config,
 				consentMetrics,
-				domains: () => contracts.domainDescriptions
+				domains: () => contracts.domainDescriptions,
+				sources
 			}),
 			makeBriefSettingsTool({ clock, timeZone: config.timeZone }),
 			makeQuietHoursTool({
@@ -1083,7 +1087,6 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// The brief of the owner's working day, which the worker role's scheduler asks for, or the owner
 	// in their turn: the assistant speaks as in its owner's turns, given no tool. It may make a source
 	// offer after it, which the owner's yes answers.
-	const sources = deps.sources ?? SOURCE_REGISTRY;
 	const domains = (): DomainDescriptions => contracts.domainDescriptions;
 	const briefs = makeBriefRunner({
 		config,
@@ -1116,6 +1119,6 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		runAvailability: availability.run,
 		runBrief: briefs.run,
 		resumeBrief: briefs.resume,
-		acceptSourceOffer: (input) => acceptSourceOffer({ config, db, domains }, input)
+		acceptSourceOffer: (input) => acceptSourceOffer({ config, db, domains, sources }, input)
 	};
 }

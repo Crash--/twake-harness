@@ -502,7 +502,7 @@ TMail does not accept the broker's token as is. That token's `aud` is `twake-spa
   - HTML to text: the contract asks the server for text values (`fetchTextBodyValues`), then collapses whitespace, caps the text, and reports TMail's `isEncodingProblem` as `body_unreadable`. It never assumes the text matches what a person sees in the message [10].
   - A Reply-To that differs from From is flagged by `read_email`, and by the answer of a reply draft, which names the resolved recipients.
   - External senders and recipients are flagged. Spam and Trash are left out of lists and search unless the owner names them.
-  - Turns triggered by an event get metadata only, no bodies.
+  - Turns triggered by an event get metadata only, no bodies, but for the Chat's mentions: no contract reads the Chat, so a mention's turn is handed the words of each message, cut and under `untrusted`, as the matrix role read them (see Chat mentions in `docs/events.md`).
   - The frozen call shows what the contract resolved (recipients, Reply-To, exact text), not the model's paraphrase.
   - One message per write, per-owner quotas on writes, and calls serialized per owner.
   - Mail content never goes to the assistant's long-term memory, and Mail tools are offered only in the owner's private conversation.

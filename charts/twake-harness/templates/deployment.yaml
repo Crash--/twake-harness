@@ -121,6 +121,10 @@ spec:
             - name: SUGGESTIONS_USER_LOCALPART
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.config.chatMentionsEnabled }}
+            - name: CHAT_MENTIONS_ENABLED
+              value: "true"
+            {{- end }}
             {{- with .Values.config.spaceApiUrl }}
             - name: SPACE_API_URL
               value: {{ . | quote }}

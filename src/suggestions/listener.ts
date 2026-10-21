@@ -10,6 +10,11 @@ export function listenerUserId(config: Config): string {
 
 const DISPLAY_NAMES = { en: 'Twake Assistant', fr: 'Assistant Twake' } as const;
 
+// The name the listener's members see it under, in the deployment's language
+export function listenerName(config: Config): string {
+	return DISPLAY_NAMES[config.locale];
+}
+
 interface StateEvent {
 	readonly type?: unknown;
 	readonly state_key?: unknown;
@@ -91,7 +96,7 @@ export function makeChannelListener(deps: ChannelListenerDeps): ChannelListener 
 		async start() {
 			const { userLocalpart } = config.suggestions;
 			await admin.registerUser(userLocalpart);
-			await admin.setDisplayName(listenerUserId(config), DISPLAY_NAMES[config.locale]);
+			await admin.setDisplayName(listenerUserId(config), listenerName(config));
 			for (const roomId of await intent.underlyingClient.getJoinedRooms()) {
 				const why = whyNotAChannel(await stateOf(roomId));
 				if (why === null) {

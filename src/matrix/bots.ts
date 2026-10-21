@@ -28,7 +28,7 @@ export function botsOf(state: readonly RoomEvent[], serverName: string): Set<str
 }
 
 // An assistant or the listener, the harness's own accounts: neither is asked for a yes, whatever it
-// does in a room
+// does in a room, nor mentions anybody, nor is mentioned for anybody
 export function isPlatformAccount(config: Config, userId: string): boolean {
 	return isAssistantUserId(config, userId) || userId === listenerUserId(config);
 }
