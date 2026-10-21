@@ -1242,7 +1242,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		ownerUserId: string,
 		assistantUserId: string
 	): Promise<ListenVerdict> {
-		if ((await roomEncryption(assistantUserId, roomId)) !== 'encrypted') return 'not_encrypted';
+		const encryption = await roomEncryption(assistantUserId, roomId);
+		// An encryption the homeserver failed to tell says nothing of the room, as a failed read of its
+		// state does: only the homeserver's word that it has none makes the room one that is not encrypted
+		if (encryption === 'unreadable') return 'check_failed';
+		if (encryption !== 'encrypted') return 'not_encrypted';
 		const state = (await intent.underlyingClient.getRoomState(roomId)) as (RoomEvent & {
 			origin_server_ts?: number;
 		})[];

@@ -2997,6 +2997,50 @@ describe('the assistant proposes from the messages of channels', () => {
 			}
 		});
 
+		// A room the assistant does not hold as encrypted is read again by the check, since the SDK takes
+		// a state it failed to read for none: the homeserver failing that read says nothing of the room
+		// either, so the assistant goes as it does for any check that fails, never with the reason of a
+		// room that is not a private conversation
+		it('leaves without a word, and without a reason, when the encryption of the room cannot be read at its invite', async () => {
+			const c = await encryptedConversation();
+			try {
+				// Asked and said yes, so that only the failed read can make it go
+				await c.ask();
+				await c.answer(true);
+				// Failed from before its invite, so that its encryption store never learns the room by itself
+				const encryptionOfRoom = (path: string): boolean => {
+					const bare = decodeURIComponent(path).split('?')[0] ?? '';
+					return bare.includes(`/rooms/${c.room}/state/m.room.encryption`);
+				};
+				h.apisix.matrixFault = (call) =>
+					call.method === 'GET' && encryptionOfRoom(call.path) ? 500 : null;
+				await c.ownerClient.client.inviteUser(c.assistant, c.room);
+
+				expect(await leftRoom(c.other, c.room, c.assistant)).toBe(true);
+				expect(await c.listened()).toBe(0);
+				expect(c.written()).toHaveLength(0);
+				const left = await h.synapse.request(
+					c.other,
+					'GET',
+					`/_matrix/client/v3/rooms/${encodeURIComponent(c.room)}/state/m.room.member/${encodeURIComponent(c.assistant)}`
+				);
+				expect(left.body['reason']).toBeUndefined();
+				expect(
+					h
+						.logLines()
+						.some(
+							(line) =>
+								line['msg'] === 'assistant declined an invite' &&
+								line['roomId'] === c.room &&
+								line['reason'] === 'check_failed'
+						)
+				).toBe(true);
+			} finally {
+				h.apisix.matrixFault = null;
+				await c.stop();
+			}
+		});
+
 		it('keeps both assistants of a channel of three people when each person answers both, in one consent', async () => {
 			const tag = Math.random().toString(36).slice(2, 7);
 			const a = await becomeAssistantOwner(`a${tag}`);
