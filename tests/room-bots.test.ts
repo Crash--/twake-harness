@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { COMMANDS_EVENT_TYPE } from '../src/matrix/commands.js';
-import { botsOf } from '../src/matrix/role.js';
+import { botsOf } from '../src/matrix/bots.js';
 
 const member = (userId: string) => ({ type: 'm.room.member', state_key: userId, sender: userId });
 
