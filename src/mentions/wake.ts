@@ -16,7 +16,7 @@ import {
 import {
 	hasDueMentions,
 	listDueRooms,
-	listRoomMentions,
+	lockRoomMentions,
 	settleMentions,
 	type PendingMention
 } from './repository.js';
@@ -117,7 +117,7 @@ export async function wakeForMentions(deps: WakeDeps, owner: string): Promise<nu
 		}
 		const carried: Carried[] = [];
 		for (const roomId of await listDueRooms(tx, owner, due)) {
-			const [first, ...others] = await listRoomMentions(tx, owner, roomId);
+			const [first, ...others] = await lockRoomMentions(tx, owner, roomId);
 			if (first === undefined) continue;
 			const eventIds = [first, ...others].map(({ eventId }) => eventId);
 			rooms.push({ roomId, eventIds });
