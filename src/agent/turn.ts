@@ -822,10 +822,11 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 
 	// The harness's check of the words of an answer, in a turn that could act for its owner and did
 	// not. A decision model first tells, in a fraction of a second, whether the exchange has to do
-	// with what the assistant can do: one that has not is sent as it is. For the others, a model
-	// reads the answer sentence by sentence, with what came before it, and names those that say the
-	// assistant did something in an application. The words stay as they are; the owner then reads
-	// below them that nothing was done. A check that fails changes nothing.
+	// with what the assistant can do: one that has not is sent as it is, and one it could not sort is
+	// checked all the same. For the others, a model reads the answer sentence by sentence, with what
+	// came before it, and names those that say the assistant did something in an application. The
+	// words stay as they are; the owner then reads below them that nothing was done. A check that
+	// fails changes nothing.
 	async function verify(state: TurnStep): Promise<TurnUpdate> {
 		// A turn others started says what the harness chose for it, and is not checked
 		if (guard === undefined || decision === null || comesFromOthers(input.context.origin)) {
@@ -837,20 +838,27 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		const canAct = deps.tools.definitions.some((tool) => actionOf(tool.function.name) !== null);
 		if (!canAct || acted) return {};
 		const words = state.answer ?? '';
+		const actions = deps.tools.definitions
+			.filter((tool) => actionOf(tool.function.name) !== null)
+			.map((tool) => ({ name: tool.function.name, description: tool.function.description }));
+		const last = [...past, ...state.messages].filter((said) => said.role === 'user').at(-1);
+		// A sorting that fails is no probability, and no probability never spares an answer its check
+		let probability: number | null = null;
 		try {
-			const actions = deps.tools.definitions
-				.filter((tool) => actionOf(tool.function.name) !== null)
-				.map((tool) => ({ name: tool.function.name, description: tool.function.description }));
-			const last = [...past, ...state.messages].filter((said) => said.role === 'user').at(-1);
 			const started = performance.now();
 			const sorted = await decision.complete(sortRequest(actions, last?.content ?? '', words), []);
 			spend(deps.log, state.iteration, sorted, spent);
-			const probability = readSort(sorted.content);
+			probability = readSort(sorted.content);
 			deps.log.info(
 				{ probability, durationMs: Math.round(performance.now() - started) },
 				'answer sorted'
 			);
-			if (!isConcerned(probability)) return {};
+		} catch (err: unknown) {
+			if (!(err instanceof LlmError)) throw err;
+			deps.log.warn({ err }, 'answer not sorted');
+		}
+		if (!isConcerned(probability)) return {};
+		try {
 			const sentences = sentencesOf(words, input.locale);
 			// What the owner's events say, when the turn did not read them: a sentence that reports one
 			// is then told from a sentence that claims an action

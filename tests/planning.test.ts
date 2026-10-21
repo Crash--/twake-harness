@@ -836,23 +836,54 @@ describe('a deployment whose gateway serves a decision model to sort answers', (
 		);
 
 		it(
-			'sends an answer as it is, unchecked, when it cannot sort it',
+			'checks an answer all the same when it cannot sort it',
 			{
 				timeout: 30_000
 			},
 			async () => {
 				holdSortingsOf('concerns');
 				h.apisix.llm.script = () => ({ content: 'I accepted the invitation.' });
-				// A check would name this sentence: none is made
+				// A sorting that is no answer never spares an answer its check, which names this sentence
 				h.apisix.llm.checkScript = () => ({ content: '{"claims":[1]}' });
 				h.apisix.llm.checks.length = 0;
-				const logged = lines('answer not checked').length;
+				const logged = lines('answer not sorted').length;
 				const body = await chatHeld('Accept the invitation of Bob');
-				expect(body.answer).toBe('I accepted the invitation.');
-				expect(h.apisix.llm.checks).toHaveLength(0);
-				expect(lines('answer not checked')).toHaveLength(logged + 1);
+				expect(body.answer).toBe(
+					'I accepted the invitation.\n\nNothing was done in your applications for this message.'
+				);
+				expect(h.apisix.llm.checks).toHaveLength(1);
+				expect(lines('answer not sorted')).toHaveLength(logged + 1);
 			}
 		);
+
+		it('checks an answer all the same when its sorting fails', async () => {
+			h.apisix.llm.sortFault = (request) =>
+				questionsOf(request).includes('concerns') ? { failWith: 503 } : {};
+			h.apisix.llm.script = () => ({ content: 'I accepted the invitation.' });
+			h.apisix.llm.checkScript = () => ({ content: '{"claims":[1]}' });
+			h.apisix.llm.checks.length = 0;
+			const notSorted = lines('answer not sorted').length;
+			const notChecked = lines('answer not checked').length;
+			const { body } = await chat(h, 'Accept the invitation of Bob');
+			expect(body.answer).toBe(
+				'I accepted the invitation.\n\nNothing was done in your applications for this message.'
+			);
+			expect(h.apisix.llm.checks).toHaveLength(1);
+			// The sorting failed, and the check did not
+			expect(lines('answer not sorted')).toHaveLength(notSorted + 1);
+			expect(lines('answer not checked')).toHaveLength(notChecked);
+		});
+
+		it('sends an answer as it is when its check fails', async () => {
+			h.apisix.llm.script = () => ({ content: 'I accepted the invitation.' });
+			h.apisix.llm.checkScript = () => ({ failWith: 503 });
+			h.apisix.llm.checks.length = 0;
+			const logged = lines('answer not checked').length;
+			const { body } = await chat(h, 'Accept the invitation of Bob');
+			expect(body.answer).toBe('I accepted the invitation.');
+			expect(h.apisix.llm.checks).toHaveLength(1);
+			expect(lines('answer not checked')).toHaveLength(logged + 1);
+		});
 
 		it(
 			'counts as unknown a message asked about from Twake Chat that it cannot sort',
@@ -876,13 +907,13 @@ describe('a deployment whose gateway serves a decision model to sort answers', (
 		it('goes on the same when it fails', async () => {
 			h.apisix.llm.sortFault = () => ({ failWith: 503 });
 			h.apisix.llm.script = () => ({ content: 'Sure.' });
-			const logged = ['message not routed', 'asked message not sorted', 'answer not checked'].map(
+			const logged = ['message not routed', 'asked message not sorted', 'answer not sorted'].map(
 				(msg) => lines(msg).length
 			);
 			const { body } = await chat(h, fromChat);
 			expect(body.answer).toBe('Sure.');
 			expect(
-				['message not routed', 'asked message not sorted', 'answer not checked'].map(
+				['message not routed', 'asked message not sorted', 'answer not sorted'].map(
 					(msg) => lines(msg).length
 				)
 			).toEqual(logged.map((count) => count + 1));
