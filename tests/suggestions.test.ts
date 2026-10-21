@@ -12,7 +12,7 @@ import {
 import { makeSpaceNotifications } from '../src/suggestions/space.js';
 import { grantConsent } from './helpers/consents.js';
 import { eventually } from './helpers/feedback.js';
-import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
+import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	MEETING_CATALOG,
 	toolsOf,
@@ -1479,24 +1479,28 @@ describe('the assistant proposes from the messages of channels', () => {
 					.slice(since)
 					.filter((line) => line['msg'] === msg);
 
-			// The day the model named, three days after the moment of its own prompt: read from the
-			// recorded call, never recomputed from the wall clock
-			function askedDay(): string {
-				const turns = h.apisix.llm.calls
+			// The day the model named for the request of this conversation, as it names it from the
+			// moment of the first prompt that offered its owner the tool: read from the recorded call,
+			// never from the wall clock and never from the call of another conversation. That call
+			// exists once the owner's turn has run, and until then the day is not known, so a test
+			// reads it then, in a handler of the fake gateway or in a check after the turn
+			function askedDay(c: Conversation): string {
+				const system = h.apisix.llm.calls
 					.map((call) => call.request)
-					.filter((request) => toolsOf(request).includes('propose_meeting'));
-				const system = turns.at(-1)?.messages[0]?.content ?? '';
-				const iso = /ISO 8601: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})/.exec(
-					system
-				)?.[1];
-				const base = iso === undefined ? new Date() : new Date(iso);
-				return dateIn(new Date(base.getTime() + 3 * 86_400_000), 'Europe/Paris');
+					.filter((request) => toolsOf(request).includes('propose_meeting'))
+					.map((request) => request.messages[0]?.content ?? '')
+					.find((content) => content.includes(`whose address is ${c.ownerPrincipal}.`));
+				if (system === undefined) {
+					throw new Error(`no prompt offering propose_meeting is recorded for ${c.ownerPrincipal}`);
+				}
+				return dayFromMoment(system, 3);
 			}
 
-			// The instant a time of the asked day falls on, in the owner's zone
-			const at = (day: string, time: string): number => {
+			// The instant a time falls on the asked day, in the owner's zone: the asked time itself, or
+			// another time of that day, such as the candidate slot an invitee offers
+			const onAskedDay = (c: Conversation, time: string): number => {
 				const [h0, m0] = time.split(':').map(Number);
-				return instantIn(day, (h0 ?? 0) * 60 + (m0 ?? 0), 'Europe/Paris').getTime();
+				return instantIn(askedDay(c), (h0 ?? 0) * 60 + (m0 ?? 0), 'Europe/Paris').getTime();
 			};
 
 			// The fake gateway's calendar as the two assistants read it, told apart by the owner each read
@@ -1564,6 +1568,33 @@ describe('the assistant proposes from the messages of channels', () => {
 				return { room, assistant };
 			}
 
+			// What the invitee's assistant wrote in its room, as their own client reads it. Its welcome
+			// is among it: it is queued with no group key where the questions carry the room's, so it
+			// can come before or after any of them, and a count of all of it can move on a request
+			// that wrote nothing
+			const writtenInRoom = (
+				c: Conversation,
+				room: string,
+				assistant: string
+			): DecryptedMessage[] =>
+				c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant);
+
+			// What the question about sharing the availability says, whatever the colleague and the
+			// period it names, in the catalog's words (suggestions.availabilitySharing.question). The
+			// wait for the question and every count of the questions read it from here, so that a
+			// reworded question stops the wait before a count can pass with nothing left to count
+			const SHARING_QUESTION = 'asking me for your availability';
+
+			// Of what the invitee's assistant wrote in its room, the questions that ask them to share
+			// their availability. The welcome is never one, so a count of them holds still whenever
+			// the welcome lands
+			const questionsAsked = (
+				c: Conversation,
+				room: string,
+				assistant: string
+			): DecryptedMessage[] =>
+				writtenInRoom(c, room, assistant).filter((m) => m.body.includes(SHARING_QUESTION));
+
 			// The question the harness asked the invitee about sharing their availability, once their
 			// own assistant wrote it in their room: the event that carries it, and its text, which
 			// names the colleague and the period
@@ -1575,12 +1606,10 @@ describe('the assistant proposes from the messages of channels', () => {
 				const text = await c.otherClient.waitForMessage(
 					room,
 					assistant,
-					(t) => t.includes(c.ownerPrincipal) && t.includes('asking me for your availability'),
+					(t) => t.includes(c.ownerPrincipal) && t.includes(SHARING_QUESTION),
 					60_000
 				);
-				const found = c.otherClient.messages.find(
-					(m) => m.roomId === room && m.sender === assistant && m.body === text
-				);
+				const found = writtenInRoom(c, room, assistant).find((m) => m.body === text);
 				return { eventId: found?.eventId ?? '', text };
 			}
 
@@ -1635,12 +1664,6 @@ describe('the assistant proposes from the messages of channels', () => {
 					inviteeSlots: () => [],
 					organizerFree: () => true
 				});
-				const asked = askedDay();
-				const period = describeMoment(
-					new Date(`${asked}T12:00:00Z`),
-					'Europe/Paris',
-					h.config.locale
-				).date;
 				const linesBefore = h.logLines().length;
 				const contractsBefore = h.apisix.contracts.calls.length;
 				await c.otherClient.sendText(c.room, ASKING);
@@ -1648,6 +1671,13 @@ describe('the assistant proposes from the messages of channels', () => {
 				// The harness asks the invitee in their own room, naming the colleague and the period,
 				// and says what only goes out and how it is taken back
 				const question = await sharingQuestion(c, room, assistant);
+				// The period is the day the model named in this request's own prompt, which only exists
+				// once the question is out
+				const period = describeMoment(
+					new Date(`${askedDay(c)}T12:00:00Z`),
+					'Europe/Paris',
+					h.config.locale
+				).date;
 				expect(question.text).toContain(c.ownerPrincipal);
 				expect(question.text).toContain(period);
 				expect(question.text).toContain('free slots only');
@@ -1686,11 +1716,9 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				const { room, assistant } = await inviteeRoom(c);
 				await ownerRoom(c);
-				const asked = askedDay();
-				const askedAt = at(asked, '10:00');
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
-					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeFree: (start) => Date.parse(start) === onAskedDay(c, '10:00'),
 					inviteeSlots: () => [],
 					organizerFree: () => true
 				});
@@ -1701,8 +1729,8 @@ describe('the assistant proposes from the messages of channels', () => {
 				// The invitee says yes in words: the sharing is granted, and the request is answered
 				await c.otherClient.sendText(room, 'oui');
 				const seen = await proposalSeen(c, 'seen_free', linesBefore);
-				expect(seen.start).toBe(askedAt);
-				expect(seen.end).toBe(askedAt + 30 * 60_000);
+				expect(seen.start).toBe(onAskedDay(c, '10:00'));
+				expect(seen.end).toBe(onAskedDay(c, '10:00') + 30 * 60_000);
 				// The sharing stands from their yes, and the question is decided
 				const sharing = await withPrincipal(
 					h.db,
@@ -1760,9 +1788,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				// The next request asks no question: the invitee's assistant answers none itself, and
 				// the organizer falls back again, in the same words. The room's one-suggestion window
 				// is cleared, as a next day would clear it, so that a second request is made at all.
-				const questionsBefore = c.otherClient.messages.filter(
-					(m) => m.roomId === room && m.sender === assistant
-				).length;
+				const questionsBefore = questionsAsked(c, room, assistant).length;
 				await withPrincipal(
 					h.db,
 					{ id: c.ownerPrincipal },
@@ -1773,9 +1799,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				const second = await proposalSeen(c, 'not_seen', lines2);
 				expect(second.pendingCallId).not.toBe(first.pendingCallId);
 				await sleep(3000);
-				expect(
-					c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant).length
-				).toBe(questionsBefore);
+				expect(questionsAsked(c, room, assistant)).toHaveLength(questionsBefore);
 			});
 
 			it('falls back on the organizer’s calendar, and tells the invitee so, once the window closes with no answer', async () => {
@@ -1864,26 +1888,14 @@ describe('the assistant proposes from the messages of channels', () => {
 					{ id: c.ownerPrincipal },
 					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
 				);
-				const questionsBefore = c.otherClient.messages.filter(
-					(m) =>
-						m.roomId === room &&
-						m.sender === assistant &&
-						String(m.body).includes('asking me for your availability')
-				).length;
+				const questionsBefore = questionsAsked(c, room, assistant).length;
 				const lines2 = h.logLines().length;
 				await c.otherClient.sendText(c.room, ASKING2);
 				const second = await proposalSeen(c, 'seen_free', lines2);
 				expect(second.pendingCallId).toBeTruthy();
 				// No question was asked about the sharing: the yes already answered it
 				await sleep(3000);
-				expect(
-					c.otherClient.messages.filter(
-						(m) =>
-							m.roomId === room &&
-							m.sender === assistant &&
-							String(m.body).includes('asking me for your availability')
-					).length
-				).toBe(questionsBefore);
+				expect(questionsAsked(c, room, assistant)).toHaveLength(questionsBefore);
 			});
 
 			it('falls back with no question once the invitee takes the share back on the agreements page', async () => {
@@ -1916,10 +1928,11 @@ describe('the assistant proposes from the messages of channels', () => {
 				await c.otherClient.sendText(c.room, ASKING);
 				const first = await proposalSeen(c, 'not_seen', linesBefore);
 				expect(first.pendingCallId).toBeTruthy();
-				// The next request, a day later, asks no question either
-				const questionsBefore = c.otherClient.messages.filter(
-					(m) => m.roomId === room && m.sender === assistant
-				).length;
+				// The first request asked no question, since the refusal stands, and the next one, a day
+				// later, asks none either. Only the questions are counted: the invitee's assistant also
+				// writes its welcome in this room, a few seconds after its owner joined it
+				const questionsBefore = questionsAsked(c, room, assistant).length;
+				expect(questionsBefore).toBe(0);
 				await withPrincipal(
 					h.db,
 					{ id: c.ownerPrincipal },
@@ -1930,9 +1943,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				const second = await proposalSeen(c, 'not_seen', lines2);
 				expect(second.pendingCallId).not.toBe(first.pendingCallId);
 				await sleep(3000);
-				expect(
-					c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant).length
-				).toBe(questionsBefore);
+				expect(questionsAsked(c, room, assistant)).toHaveLength(questionsBefore);
 			});
 
 			it('proposes the asked time and says the invitee is free, reading their calendar for them alone', async () => {
@@ -1940,11 +1951,9 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				await shareAvailability(c);
 				const dm = await ownerRoom(c);
-				const asked = askedDay();
-				const askedAt = at(asked, '10:00');
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
-					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeFree: (start) => Date.parse(start) === onAskedDay(c, '10:00'),
 					inviteeSlots: () => [],
 					organizerFree: () => true
 				});
@@ -1961,8 +1970,8 @@ describe('the assistant proposes from the messages of channels', () => {
 					logged('suggestion made', linesBefore).find((line) => line['invitee'] === 'seen_free')
 				);
 				const body = await frozenBody(c.ownerPrincipal, call['pendingCallId'] as string);
-				expect(Date.parse(String(body?.['start']))).toBe(askedAt);
-				expect(Date.parse(String(body?.['end']))).toBe(askedAt + 30 * 60_000);
+				expect(Date.parse(String(body?.['start']))).toBe(onAskedDay(c, '10:00'));
+				expect(Date.parse(String(body?.['end']))).toBe(onAskedDay(c, '10:00') + 30 * 60_000);
 
 				// The invitee's own calendar was read, on the invitee's behalf alone, and never with the
 				// organizer's address
@@ -2035,15 +2044,13 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				await shareAvailability(c);
 				const dm = await ownerRoom(c);
-				const asked = askedDay();
-				const inviteeFreeAt = at(asked, '14:00');
 				// The invitee is taken at the asked time (10:00) and free at 14:00; the organizer is free
 				// only from 14:00 on
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
-					inviteeFree: (start) => Date.parse(start) === inviteeFreeAt,
+					inviteeFree: (start) => Date.parse(start) === onAskedDay(c, '14:00'),
 					inviteeSlots: inviteeSlotAt('14:00'),
-					organizerFree: (start) => Date.parse(start) >= inviteeFreeAt,
+					organizerFree: (start) => Date.parse(start) >= onAskedDay(c, '14:00'),
 					organizerSlots: inviteeSlotAt('14:00')
 				});
 				const linesBefore = h.logLines().length;
@@ -2061,8 +2068,8 @@ describe('the assistant proposes from the messages of channels', () => {
 					60_000
 				);
 				const body = await frozenBody(c.ownerPrincipal, call['pendingCallId'] as string);
-				expect(Date.parse(String(body?.['start']))).toBe(inviteeFreeAt);
-				expect(Date.parse(String(body?.['end']))).toBe(inviteeFreeAt + 30 * 60_000);
+				expect(Date.parse(String(body?.['start']))).toBe(onAskedDay(c, '14:00'));
+				expect(Date.parse(String(body?.['end']))).toBe(onAskedDay(c, '14:00') + 30 * 60_000);
 			});
 
 			it('proposes nothing, and says why, when the two share no slot', async () => {
@@ -2189,7 +2196,6 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				await shareAvailability(c);
 				await ownerRoom(c);
-				const asked = askedDay();
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
 					inviteeFree: () => true,
@@ -2219,7 +2225,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				expect(row.outcome).toBe('answered');
 				const view = activityView(row, 'Europe/Paris');
 				expect(view['organizer']).toBe(c.ownerPrincipal);
-				expect(view['period_start']).toBe(asked);
+				expect(view['period_start']).toBe(askedDay(c));
 				expect(view['asked_minutes']).toBe(600);
 				expect(view['duration_ms']).toBe(30 * 60_000);
 				const slots = view['slots'];
@@ -2242,7 +2248,6 @@ describe('the assistant proposes from the messages of channels', () => {
 					{ id: c.otherPrincipal },
 					(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
 				);
-				const asked = askedDay();
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
 					inviteeFree: () => true,
@@ -2268,7 +2273,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				expect(row.outcome).toBe('not_shared');
 				const view = activityView(row, 'Europe/Paris');
 				expect(view['organizer']).toBe(c.ownerPrincipal);
-				expect(view['period_start']).toBe(asked);
+				expect(view['period_start']).toBe(askedDay(c));
 				expect(view['slots']).toEqual([]);
 			});
 
@@ -2276,14 +2281,17 @@ describe('the assistant proposes from the messages of channels', () => {
 				const c = await listenedConversation();
 				await inviteeAssistant(c);
 				await shareAvailability(c);
+				const { room, assistant } = await inviteeRoom(c);
 				await ownerRoom(c);
-				// The invitee's own assistant room, joined so that its messages can be read, with what
-				// the assistant already wrote there as the baseline
-				const roomRows = await h.db.sql<{ room_id: string }[]>`
-					select room_id from assistant_rooms where owner = ${c.otherPrincipal} limit 1`;
-				const inviteeRoom = roomRows[0]?.room_id ?? '';
-				await c.otherClient.joinRoom(inviteeRoom);
-				const baseline = (await h.synapse.messagesFrom(c.other, inviteeRoom, c.assistant)).length;
+				// The invitee's assistant writes its welcome in that room a few seconds after they joined
+				// it, whatever the answers do, and it is the one thing it has said there so far: it is
+				// waited for, so that the messages counted from there on are those an answer would post.
+				// Their client reads the room, since everything the assistants write in it is encrypted.
+				// Every message counts, not only a question: whatever an answer wrote there breaks the
+				// title.
+				await c.otherClient.waitForMessage(room, assistant, () => true, 60_000);
+				const posted = (): DecryptedMessage[] => writtenInRoom(c, room, assistant);
+				const baseline = posted().length;
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
 					inviteeFree: () => true,
@@ -2299,12 +2307,11 @@ describe('the assistant proposes from the messages of channels', () => {
 						),
 					60_000
 				);
-				await sleep(1000);
+				// Long enough for a message that the answer sent to reach their client
+				await sleep(3000);
 				// Nothing was written to the invitee's room by their assistant, and nothing in the
 				// listened conversation either
-				expect((await h.synapse.messagesFrom(c.other, inviteeRoom, c.assistant)).length).toBe(
-					baseline
-				);
+				expect(posted()).toHaveLength(baseline);
 				expect(c.written()).toHaveLength(0);
 			});
 
@@ -2354,7 +2361,7 @@ describe('the assistant proposes from the messages of channels', () => {
 							${JSON.stringify({
 								computed: {
 									organizer: c.ownerPrincipal,
-									period_start: askedDay(),
+									period_start: '2026-10-12',
 									duration_ms: 1_800_000,
 									slots: []
 								},
@@ -2435,12 +2442,7 @@ describe('the assistant proposes from the messages of channels', () => {
 					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
 				);
 				await c.otherClient.sendText(c.room, 'on se fait une réunion mardi à 8h ?');
-				const text = await c.otherClient.waitForMessage(
-					again.body.roomId,
-					again.body.userId,
-					(t) => t.includes(c.ownerPrincipal) && t.includes('asking me for your availability'),
-					60_000
-				);
+				const { text } = await sharingQuestion(c, again.body.roomId, again.body.userId);
 				expect(text).toContain('free slots only');
 			});
 
@@ -2454,13 +2456,10 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				await shareAvailability(c);
 				const dm = await ownerRoom(c);
-				const asked = askedDay();
-				const askedAt = at(asked, '10:00');
-				const otherAt = at(asked, '14:00');
 				// The invitee is free at the asked time and offers 14:00; the organizer is free at both
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
-					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeFree: (start) => Date.parse(start) === onAskedDay(c, '10:00'),
 					inviteeSlots: inviteeSlotAt('14:00'),
 					organizerFree: () => true,
 					organizerSlots: inviteeSlotAt('14:00')
@@ -2469,7 +2468,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				await c.otherClient.sendText(c.room, ASKING);
 				// The first proposal is the asked time, the invitee seen free there
 				const first = await proposalSeen(c, 'seen_free', linesBefore);
-				expect(first.start).toBe(askedAt);
+				expect(first.start).toBe(onAskedDay(c, '10:00'));
 
 				// The owner asks for another moment: the harness asks the invitee's assistant again, no
 				// model, and the new proposal is the free slot where both are free, never the refused one
@@ -2484,7 +2483,7 @@ describe('the assistant proposes from the messages of channels', () => {
 					).status
 				).toBe(200);
 				const second = await proposalSeen(c, 'seen_free', since);
-				expect(second.start).toBe(otherAt);
+				expect(second.start).toBe(onAskedDay(c, '14:00'));
 				expect(second.start).not.toBe(first.start);
 				// No model ran for the second try: no turn carried the refused proposal to it, and the
 				// harness's own model-free line records the retry
@@ -2521,12 +2520,9 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				await shareAvailability(c);
 				await ownerRoom(c);
-				const asked = askedDay();
-				const askedAt = at(asked, '10:00');
-				const otherAt = at(asked, '14:00');
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
-					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeFree: (start) => Date.parse(start) === onAskedDay(c, '10:00'),
 					inviteeSlots: inviteeSlotAt('14:00'),
 					organizerFree: () => true,
 					organizerSlots: inviteeSlotAt('14:00')
@@ -2534,7 +2530,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				const linesBefore = h.logLines().length;
 				await c.otherClient.sendText(c.room, ASKING);
 				const first = await proposalSeen(c, 'seen_free', linesBefore);
-				expect(first.start).toBe(askedAt);
+				expect(first.start).toBe(onAskedDay(c, '10:00'));
 
 				// The invitee takes the sharing back on the agreements page, which keeps their refusal
 				expect(
@@ -2547,7 +2543,7 @@ describe('the assistant proposes from the messages of channels', () => {
 					reason: 'another_time'
 				});
 				const second = await proposalSeen(c, 'not_seen', since);
-				expect(second.start).toBe(otherAt);
+				expect(second.start).toBe(onAskedDay(c, '14:00'));
 				expect(second.start).not.toBe(first.start);
 			});
 
@@ -2556,11 +2552,9 @@ describe('the assistant proposes from the messages of channels', () => {
 				await inviteeAssistant(c);
 				await shareAvailability(c);
 				await ownerRoom(c);
-				const asked = askedDay();
-				const askedAt = at(asked, '10:00');
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
-					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeFree: (start) => Date.parse(start) === onAskedDay(c, '10:00'),
 					inviteeSlots: inviteeSlotAt('14:00'),
 					organizerFree: () => true,
 					organizerSlots: inviteeSlotAt('14:00')
