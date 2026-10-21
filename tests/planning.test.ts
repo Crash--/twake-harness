@@ -851,6 +851,16 @@ describe('a deployment whose gateway serves a decision model to sort answers', (
 				)
 			).toEqual(logged.map((count) => count + 1));
 		});
+
+		it('goes on the same when it answers a page that is not JSON', async () => {
+			h.apisix.llm.sortFault = () => ({ html: '<html><body>502 Bad Gateway</body></html>' });
+			h.apisix.llm.script = () => ({ content: 'Sure.' });
+			const logged = lines('message not routed').length;
+			const { status, body } = await chat(h, 'Accept the invitation of Bob');
+			expect(status).toBe(200);
+			expect(body.answer).toBe('Sure.');
+			expect(lines('message not routed')).toHaveLength(logged + 1);
+		});
 	});
 });
 

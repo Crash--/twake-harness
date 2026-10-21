@@ -38,6 +38,9 @@ export interface ScriptedReply {
 	// The status the gateway answers with instead of a completion, as when the model's provider
 	// fails: the call is recorded all the same
 	failWith?: number;
+	// A page for people, answered with a 200 instead of a completion, as a proxy in front of the
+	// gateway may when its provider fails: the call is recorded all the same
+	html?: string;
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -113,9 +116,12 @@ export interface FakeApisix {
 		sorts: RecordedCall[];
 		probabilities: Record<string, number>;
 		// What goes wrong with an answer of the decision model, over the probabilities: a wait before
-		// it, a hold, or a status instead of it, as when the model is busy or its provider fails. It
-		// is given the call, so that a test tells the sortings apart by the questions they put.
-		sortFault: (request: ChatRequest) => Pick<ScriptedReply, 'delayMs' | 'hold' | 'failWith'>;
+		// it, a hold, or a status or a page instead of it, as when the model is busy or its provider
+		// fails. It is given the call, so that a test tells the sortings apart by the questions they
+		// put.
+		sortFault: (
+			request: ChatRequest
+		) => Pick<ScriptedReply, 'delayMs' | 'hold' | 'failWith' | 'html'>;
 		// Whether an answer is worth a check, as the decision model answers it: worth one unless a
 		// test says otherwise
 		checkProbability: number;
@@ -895,6 +901,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			recorded.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
 			if (reply.failWith !== undefined) {
 				sendJson(res, reply.failWith, { error: 'the model failed' });
+				return;
+			}
+			if (reply.html !== undefined) {
+				res.statusCode = 200;
+				res.setHeader('content-type', 'text/html');
+				res.end(reply.html);
 				return;
 			}
 			const message: Record<string, unknown> = {

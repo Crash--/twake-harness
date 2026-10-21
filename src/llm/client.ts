@@ -69,6 +69,14 @@ export class LlmError extends Error {
 	override readonly name = 'LlmError';
 }
 
+// A call that gave no answer, whatever went wrong between the harness and the model's reply: what
+// the callers that go on without a model that failed catch, so that they fail on a bug alone
+function failure(what: string, err: unknown): LlmError {
+	return new LlmError(`${what}: ${err instanceof Error ? err.message : String(err)}`, {
+		cause: err
+	});
+}
+
 const toolCallSchema = z.object({
 	id: z.string(),
 	type: z.literal('function'),
@@ -134,17 +142,20 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 					signal: AbortSignal.timeout(options.timeoutMs)
 				});
 			} catch (err: unknown) {
-				throw new LlmError(
-					`model call failed: ${err instanceof Error ? err.message : String(err)}`,
-					{
-						cause: err
-					}
-				);
+				throw failure('model call failed', err);
 			}
 			if (!response.ok) {
 				throw new LlmError(`model answered HTTP ${response.status}`);
 			}
-			const parsed = completionSchema.safeParse(await response.json());
+			// The call keeps its time limit until its answer is read, and a proxy in front of the model
+			// may answer a page that is not JSON: a model that failed in either way is no bug
+			let answer: unknown;
+			try {
+				answer = await response.json();
+			} catch (err: unknown) {
+				throw failure('model answer could not be read', err);
+			}
+			const parsed = completionSchema.safeParse(answer);
 			if (!parsed.success) {
 				throw new LlmError('model answer has an unexpected shape');
 			}
