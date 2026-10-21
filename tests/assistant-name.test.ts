@@ -306,7 +306,8 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			{ localpart: 'bea', name: 'Bea ARTHUR', given: 'Assistant' },
 			{ localpart: 'cid', name: 'Cid CAMPEADOR', given: 'Jarvis' }
 		];
-		const opened: { owner: MatrixUser; assistantId: string; roomId: string }[] = [];
+		const opened: { localpart: string; owner: MatrixUser; assistantId: string; roomId: string }[] =
+			[];
 		for (const { localpart, name, given } of owners) {
 			const { owner, assistant } = await provisioned(h, localpart, name);
 			const roomId = await h.synapse.createDirectRoom(owner, assistant.userId);
@@ -315,7 +316,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			});
 			expect(renamed.status).toBe(200);
 			expect(await nameShown(owner, roomId, assistant.userId, given)).toBe(given);
-			opened.push({ owner, assistantId: assistant.userId, roomId });
+			opened.push({ localpart, owner, assistantId: assistant.userId, roomId });
 		}
 		const [ana, bea, cid] = opened;
 		if (ana === undefined || bea === undefined || cid === undefined) {
@@ -348,6 +349,21 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		expect(chosen.status).toBe(200);
 		expect(await nameShown(ana.owner, ana.roomId, ana.assistantId, 'Assistant')).toBe('Assistant');
 
+		// The homeserver shows a name once it has it, and the gateway records the call that wrote it
+		// once the homeserver answered: that call, the last of a naming, could be recorded after
+		// secondStart is taken, and be counted as a call of the second start. A job is deleted once
+		// its handler returned, each call it made recorded, so the naming of ana and cid is over when
+		// no job of theirs is left.
+		const principals = [ana, cid].map(({ localpart }) => `${localpart}@test.local`);
+		const namingOver = async (): Promise<boolean> => {
+			const left = await h.db.sql`
+				select 1 from jobs
+				where kind = 'name' and status in ('queued', 'running')
+					and (payload #>> '{}')::jsonb ->> 'owner' in ${h.db.sql(principals)}`;
+			return left.length === 0;
+		};
+		expect(await eventually(namingOver)).toBe(true);
+
 		const secondStart = h.apisix.matrixCalls.length;
 		await h.restartRole();
 
@@ -362,11 +378,13 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			profileName(assistantId),
 			memberEvent(roomId, assistantId)
 		]);
-		const checkedAgain = (): boolean =>
+		const checkedAgain = (): typeof h.apisix.matrixCalls =>
 			h.apisix.matrixCalls
 				.slice(secondStart)
-				.some((call) => paths.some((path) => call.path.includes(path)));
-		expect(await eventually(checkedAgain, 3_000)).toBe(false);
+				.filter((call) => paths.some((path) => call.path.includes(path)));
+		// A call has three seconds to come, and is shown if it did
+		await eventually(() => checkedAgain().length > 0, 3_000);
+		expect(checkedAgain()).toEqual([]);
 		for (const [localpart, expected] of [
 			['ana', 'Assistant'],
 			['bea', "Bea's assistant"],
