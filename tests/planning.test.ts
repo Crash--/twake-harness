@@ -361,6 +361,13 @@ describe('a turn whose request is planned in steps by a decision model', () => {
 		}
 	});
 
+	// The line the harness logs of the read it made for a check, the last of the turn
+	const eventsRead = (): Record<string, unknown> | undefined =>
+		h
+			.logLines()
+			.filter((line) => line['msg'] === 'events read for a check')
+			.at(-1);
+
 	it('reads the events of the owner itself to check an answer against, asking them nothing', async () => {
 		// The owner already lets their assistant read their calendar: without that, it reads nothing
 		h.apisix.contracts.handler = () => ({
@@ -381,6 +388,35 @@ describe('a turn whose request is planned in steps by a decision model', () => {
 		expect(h.apisix.llm.checks[0]?.request.messages[1]?.content).toMatch(
 			/\[result of list_calendar_events\].*moved to Friday by Bob/
 		);
+		expect(eventsRead()).toMatchObject({ tool: 'list_calendar_events', read: true });
+	});
+
+	it('gives the check no events when their owner never allowed their calendar', async () => {
+		h.apisix.llm.script = () => ({ content: 'The budget review was moved to Friday.' });
+		const body = await as('noor')('/v1/chat', { message: 'Any news on the budget review?' });
+		expect(body.answer).toBe('The budget review was moved to Friday.');
+		// Nobody was asked for a yes, and the contract was not called
+		expect(body.pending_call).toBeUndefined();
+		expect(h.apisix.contracts.calls).toEqual([]);
+		// The answer is checked all the same, without a read that said it was not asked: that is no event
+		expect(h.apisix.llm.checks).toHaveLength(1);
+		expect(h.apisix.llm.checks[0]?.request.messages[1]?.content).not.toMatch(
+			/list_calendar_events/
+		);
+		expect(eventsRead()).toMatchObject({ read: false, reason: 'consent' });
+	});
+
+	it('gives the check no events when the contract that lists them fails', async () => {
+		h.apisix.contracts.handler = () => ({ status: 502, body: { error: 'down' } });
+		h.apisix.llm.script = () => ({ content: 'The budget review was moved to Friday.' });
+		const { body } = await chat(h, 'Any news on the budget review?');
+		expect(body.answer).toBe('The budget review was moved to Friday.');
+		expect(h.apisix.contracts.calls).toHaveLength(1);
+		expect(h.apisix.llm.checks).toHaveLength(1);
+		expect(h.apisix.llm.checks[0]?.request.messages[1]?.content).not.toMatch(
+			/list_calendar_events/
+		);
+		expect(eventsRead()).toMatchObject({ read: false, reason: 'failed', status: 502 });
 	});
 
 	it('runs no write before the steps planned ahead of it', async () => {

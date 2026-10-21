@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { z } from 'zod';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
@@ -66,6 +67,7 @@ import {
 } from './invitation.js';
 import { assistantPrompt, defaultPrompt, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
+import { readOf } from './reads.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
@@ -948,7 +950,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				nothingDoneNotice: () => messages.notices.nothingDone,
 				// A read of the harness's own, which asks the owner nothing: without their consent already
 				// given, or the platform's permission, it reads nothing. It lists from the owner's day, which
-				// the contract requires, and leaves the rest to the contract's defaults.
+				// the contract requires, and leaves the rest to the contract's defaults. Only the events the
+				// contract answered are given to the check: that it was not asked, or failed, is no event.
 				ownerEvents: async () => {
 					const tool = turnTools.find(LIST_CALENDAR_EVENTS);
 					if (tool === null) return null;
@@ -957,13 +960,23 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						{ from: dateIn(now, timeZone) },
 						{ ...context, unattended: true }
 					);
+					const read = readOf(outcome, z.unknown());
 					log.info(
-						{ tool: LIST_CALENDAR_EVENTS, status: toolCallStatus(outcome) },
+						{
+							tool: LIST_CALENDAR_EVENTS,
+							read: read.ok,
+							...(read.ok
+								? {}
+								: {
+										reason: read.reason,
+										...(read.status === undefined ? {} : { status: read.status })
+									})
+						},
 						'events read for a check'
 					);
-					return toolCallStatus(outcome) !== 'ok'
-						? null
-						: { role: 'tool', name: LIST_CALENDAR_EVENTS, content: JSON.stringify(outcome.result) };
+					return read.ok
+						? { role: 'tool', name: LIST_CALENDAR_EVENTS, content: JSON.stringify(outcome.result) }
+						: null;
 				}
 			};
 			try {
