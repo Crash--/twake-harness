@@ -59,6 +59,7 @@ import type { Admission } from './admission.js';
 import {
 	dateIn,
 	describeMoment,
+	describeTomorrow,
 	findTimeZone,
 	isCalendarDay,
 	quarterHourOf,
@@ -906,6 +907,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				})
 			: makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null, onCalendar);
 		const moment = describeMoment(now, timeZone, locale);
+		const tomorrow = describeTomorrow(now, timeZone, locale);
 		const messages = getMessages(locale);
 		// A suggestion spends its owner's day, and never the share of it that the turns activities wake
 		// and the briefs spend, which cuts no suggestion
@@ -1232,7 +1234,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						{
 							systemPrompt: buildSystemPrompt({
 								persona: `${listened ? listenedRules(owner) : systemRules(owner, others)} ${messages.language.speak}`,
-								moment: messages.now(moment.words, moment.iso, moment.timeZone),
+								moment: messages.now(moment.words, moment.iso, moment.timeZone, tomorrow),
 								memory: { memory: [], user: [] },
 								history: [],
 								nudgeInterval: 0

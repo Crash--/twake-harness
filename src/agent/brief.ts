@@ -108,7 +108,15 @@ import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
-import { dateIn, describeMoment, isoIn, timeOfDay, type Clock, type TimeZone } from './clock.js';
+import {
+	dateIn,
+	describeMoment,
+	describeTomorrow,
+	isoIn,
+	timeOfDay,
+	type Clock,
+	type TimeZone
+} from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runTool, type ToolContext, type ToolOutcome, type ToolRegistry } from './tools.js';
@@ -1327,10 +1335,12 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		const messages = getMessages(locale);
 		for (const [name, skipped] of readsOf(sections)) logSkipped(name, skipped, log);
 		const told = `${writing.told}\n${messages.brief.day(fenced(BRIEF_DATA, dataOf(date, reads)))}`;
-		const moment = describeMoment(clock.now(), timeZone, locale);
+		const now = clock.now();
+		const moment = describeMoment(now, timeZone, locale);
+		const tomorrow = describeTomorrow(now, timeZone, locale);
 		const system = buildSystemPrompt({
 			persona: deps.persona(writing.assistantName, messages),
-			moment: messages.now(moment.words, moment.iso, moment.timeZone),
+			moment: messages.now(moment.words, moment.iso, moment.timeZone, tomorrow),
 			memory: { memory: [], user: [] },
 			history: [],
 			nudgeInterval: 0

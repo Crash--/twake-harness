@@ -451,6 +451,8 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		const request = asked[0];
 		expect(request?.tools).toBeUndefined();
 		expect(request?.messages.map((m) => m.role)).toEqual(['system', 'user']);
+		// It is told tomorrow's date, in her language, beside the present of the Monday it writes for
+		expect(request?.messages[0]?.content).toContain('Demain : mardi 13 octobre 2026 (2026-10-13).');
 		const told = lastUser(request);
 		expect(told).toMatch(
 			/^\[brief\] Ma journée de travail commence : c'est l'heure de mon brief du matin \(id brief-2026-10-12-[0-9a-f]{16}\)\.\n/

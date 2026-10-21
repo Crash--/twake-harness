@@ -176,6 +176,22 @@ export function isoIn(instant: Date, timeZone: string): string {
 	return `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
 }
 
+// The day after the one a person in the zone reads at an instant, in words, in the owner's
+// language, and as ISO 8601 writes it: "dimanche 11 octobre 2026" and "2026-10-11"
+export interface Tomorrow {
+	readonly words: string;
+	readonly iso: string;
+}
+
+// Tomorrow is the next day of the zone's calendar, never the instant 24 hours later, which falls on
+// the same day, or skips one, when the clocks change
+export function describeTomorrow(instant: Date, timeZone: string, locale: Locale): Tomorrow {
+	const iso = dayAfter(dateIn(instant, timeZone));
+	// The words are those of the date's noon in UTC: read in the owner's zone, that noon is already
+	// the next day wherever the clocks are 12 hours ahead of UTC or more
+	return { words: describeMoment(new Date(`${iso}T12:00:00Z`), 'UTC', locale).date, iso };
+}
+
 // The day, the hour and the minute of a zone's wall clock at an instant: 2026-10-08, 9 and 30 at
 // half past nine in the morning there
 export interface WallDay {
