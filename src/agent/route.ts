@@ -79,6 +79,17 @@ export function readProbabilities(reply: string | null): ReadonlyMap<string, num
 	return given;
 }
 
+// The tokens a decision model takes to give a capability its probability: some 12 when it writes
+// the reply compact, some 20 when it spreads it over lines, measured on the names of the contracts
+const TOKENS_PER_CAPABILITY = 24;
+
+// The most tokens the reply to a routing may take, never fewer than a decision's. This reply holds
+// a probability for each capability, and one cut short cannot be read: the message would go to the
+// model unsorted, as soon as the catalog outgrows the few tokens of a decision.
+export function routeMaxTokens(capabilityCount: number, decisionMaxTokens: number): number {
+	return Math.max(decisionMaxTokens, capabilityCount * TOKENS_PER_CAPABILITY);
+}
+
 // Where a turn goes once its message is sorted: each is a way of its own for the model to think,
 // with the tools that way needs and no other
 export type Lane = 'discuss' | 'consult' | 'act' | 'unsure';

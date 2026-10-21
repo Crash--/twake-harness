@@ -107,6 +107,7 @@ import { publishedUnder, type Source, type SourceRegistry } from '../sources/sou
 import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
+import { LIST_CALENDAR_EVENTS } from './calendar.js';
 import { withoutCallMarkup } from './call-markup.js';
 import {
 	dateIn,
@@ -119,12 +120,11 @@ import {
 } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
+import { readOf, type DelegationQuestion, type Read } from './reads.js';
 import { runTool, type ToolContext, type ToolOutcome, type ToolRegistry } from './tools.js';
 import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
-// The calendar's operation the brief reads the day and the invitations of, and the most meetings it
-// reads of the day
-const LIST_EVENTS = 'list_calendar_events';
+// The most meetings the brief reads of the day
 const MAX_MEETINGS = 20;
 
 // The invitations that wait for the owner's answer, over seven days from the brief's: the read gives
@@ -277,27 +277,6 @@ interface Tasks {
 	readonly today: readonly Task[];
 	readonly truncated: boolean;
 }
-
-// The harness's question about the owner's permission for their assistant to act for them, which
-// the platform's broker holds none of, or an expired one: its text, and the call it froze, which
-// waits for their answer
-interface DelegationQuestion {
-	readonly text: string;
-	readonly pendingCallId: string;
-}
-
-// A read of the brief, or why there is none: an application that needs a yes the owner did not
-// give, here or on the platform, is not read, and nobody asks them for it. The day's read the
-// platform's broker refused for want of their permission is the exception, while no brief waits
-// for their answer about it: its call waits for them, under the harness's question.
-type Read<T> =
-	| { readonly ok: true; readonly value: T }
-	| {
-			readonly ok: false;
-			readonly reason: string;
-			readonly status?: number;
-			readonly question?: DelegationQuestion;
-	  };
 
 // What the brief tells, section by section, as its reads gave it
 interface Sections {
@@ -763,37 +742,6 @@ function template(
 	};
 }
 
-// The status a contract answered a call with, and its body, when it answered
-function answerOf(result: unknown): { readonly status: number; readonly body: unknown } | null {
-	if (typeof result !== 'object' || result === null) return null;
-	const { status, body } = result as Record<string, unknown>;
-	return typeof status === 'number' ? { status, body } : null;
-}
-
-// Why a call that would have waited for its owner was not made, as the contract tool tells a turn
-// nobody attends
-function notAskedReason(result: unknown): string | null {
-	if (typeof result !== 'object' || result === null) return null;
-	const { status, reasons } = result as Record<string, unknown>;
-	return status === 'not_asked' && Array.isArray(reasons) ? reasons.join(',') : null;
-}
-
-// What a read of the brief came to, as the contract tool ran it
-function readOf<T>({ result, final, pendingCallId }: ToolOutcome, schema: z.ZodType<T>): Read<T> {
-	if (final !== undefined && pendingCallId !== undefined) {
-		return { ok: false, reason: 'delegation', question: { text: final, pendingCallId } };
-	}
-	const reason = notAskedReason(result);
-	if (reason !== null) return { ok: false, reason };
-	const answer = answerOf(result);
-	if (answer === null || answer.status < 200 || answer.status >= 300) {
-		return { ok: false, reason: 'failed', ...(answer === null ? {} : { status: answer.status }) };
-	}
-	const parsed = schema.safeParse(answer.body);
-	if (!parsed.success) return { ok: false, reason: 'unreadable', status: answer.status };
-	return { ok: true, value: parsed.data };
-}
-
 // The owner's day as the brief tells it, from the calendar's list of it
 function dayOf(list: Read<z.infer<typeof listSchema>>): Read<Day> {
 	if (!list.ok) return list;
@@ -1016,7 +964,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return dayOf(
 			await read(
 				asksDelegation ? { ...context, asksDelegation } : context,
-				LIST_EVENTS,
+				LIST_CALENDAR_EVENTS,
 				{ from: date, days: 1, limit: MAX_MEETINGS },
 				listSchema
 			)
@@ -1026,7 +974,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	async function readInvitations(context: ToolContext, date: string): Promise<Read<Invitations>> {
 		const list = await read(
 			context,
-			LIST_EVENTS,
+			LIST_CALENDAR_EVENTS,
 			{
 				from: date,
 				days: INVITATION_DAYS,

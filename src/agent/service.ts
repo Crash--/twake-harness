@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { z } from 'zod';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
@@ -54,6 +55,7 @@ import {
 	type BriefResult,
 	type BriefResumeInput
 } from './brief.js';
+import { LIST_CALENDAR_EVENTS } from './calendar.js';
 import { dateIn, describeMoment, describeTomorrow, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -65,6 +67,7 @@ import {
 } from './invitation.js';
 import { assistantPrompt, defaultPrompt, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
+import { readOf } from './reads.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
@@ -114,6 +117,7 @@ import {
 	type SuggestionResult
 } from './suggestion.js';
 import type { AvailabilityPayload } from '../suggestions/availability.js';
+import { makeDecisionClient } from '../suggestions/sort.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -154,9 +158,6 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
 // check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
 // their yes resumes is told of no event, and is not held to them.
-// The contract that lists the events the platform holds of an owner, as the catalog names it
-const OWNER_EVENTS_TOOL = 'list_events';
-
 const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
 const CHECK_ALONE = ['read_freebusy'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
@@ -390,6 +391,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			maxTokens: config.llm.maxTokens,
 			timeoutMs: config.llm.timeoutMs
 		});
+	const decisionLlm = makeDecisionClient(config.apisix, config.llm.decisionModel);
 	const { consentMetrics } = deps;
 	const contracts = makeContractCatalog({ config, log: deps.log, consentMetrics });
 	const tools = makeToolRegistry(
@@ -918,7 +920,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				contracts.contracts.find((c) => c.toolName === name && c.level === 'write');
 			const guard: TurnGuard = {
 				checkModel: config.llm.checkModel,
-				decisionModel: config.llm.decisionModel,
+				decision: decisionLlm,
 				action: (name) => {
 					const contract = written(name);
 					if (contract === undefined) return null;
@@ -947,18 +949,34 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				doneNotice: (steps) => messages.notices.stepsDone(steps),
 				nothingDoneNotice: () => messages.notices.nothingDone,
 				// A read of the harness's own, which asks the owner nothing: without their consent already
-				// given, or the platform's permission, it reads nothing
+				// given, or the platform's permission, it reads nothing. It lists from the owner's day, which
+				// the contract requires, and leaves the rest to the contract's defaults. Only the events the
+				// contract answered are given to the check: that it was not asked, or failed, is no event.
 				ownerEvents: async () => {
-					const tool = turnTools.find(OWNER_EVENTS_TOOL);
+					const tool = turnTools.find(LIST_CALENDAR_EVENTS);
 					if (tool === null) return null;
-					const outcome = await runTool(tool, {}, { ...context, unattended: true });
+					const outcome = await runTool(
+						tool,
+						{ from: dateIn(now, timeZone) },
+						{ ...context, unattended: true }
+					);
+					const read = readOf(outcome, z.unknown());
 					log.info(
-						{ tool: OWNER_EVENTS_TOOL, status: toolCallStatus(outcome) },
+						{
+							tool: LIST_CALENDAR_EVENTS,
+							read: read.ok,
+							...(read.ok
+								? {}
+								: {
+										reason: read.reason,
+										...(read.status === undefined ? {} : { status: read.status })
+									})
+						},
 						'events read for a check'
 					);
-					return toolCallStatus(outcome) !== 'ok'
-						? null
-						: { role: 'tool', name: OWNER_EVENTS_TOOL, content: JSON.stringify(outcome.result) };
+					return read.ok
+						? { role: 'tool', name: LIST_CALENDAR_EVENTS, content: JSON.stringify(outcome.result) }
+						: null;
 				}
 			};
 			try {

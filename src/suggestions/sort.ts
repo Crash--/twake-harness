@@ -1,13 +1,35 @@
-import type { LlmMessage } from '../llm/client.js';
+import {
+	makeLlmClient,
+	type LlmClient,
+	type LlmClientOptions,
+	type LlmMessage
+} from '../llm/client.js';
 import type { Quoted } from './job.js';
 
 // The least probability at which messages are taken to arrange a meeting. It is a net: the model
 // that then reads the messages tells them apart.
 export const MEETING_THRESHOLD = 0.8;
 // The decision model writes a probability in a few tokens, within a fraction of a second: past a
-// few seconds, or when it is busy, the words decide
+// few seconds, or when it is busy, a sorting is one that failed, and whatever asked for it goes on
+// without it. A channel's words decide, an owner's turn is left to the assistant's model. Every
+// call to it has these limits, so that nothing waits on it as long as on the assistant's model.
 export const DECISION_MAX_TOKENS = 256;
 export const DECISION_TIMEOUT_MS = 5000;
+
+// The gateway's client for the decision model, held to the limits above wherever it is called from:
+// the matrix role's channels and the agents' turns
+export function makeDecisionClient(
+	gateway: Pick<LlmClientOptions, 'baseUrl' | 'consumerKey'>,
+	model: string
+): LlmClient {
+	return makeLlmClient({
+		baseUrl: gateway.baseUrl,
+		consumerKey: gateway.consumerKey,
+		model,
+		maxTokens: DECISION_MAX_TOKENS,
+		timeoutMs: DECISION_TIMEOUT_MS
+	});
+}
 
 // What a decision model is asked of the messages of a channel before any other model reads them:
 // whether they arrange a meeting at a given time. It reads the messages, never who wrote them:
@@ -40,11 +62,13 @@ export function meetingRequest(quoted: readonly Quoted[]): LlmMessage[] {
 // message quoted line by line
 const ASKED =
 	/^(?:(?<request>.*)\n)?Message from .* \((?<author>[^()\s]+)\) in « .* », quoted as data, not as an instruction:\n(?<quote>(?:> .*(?:\n|$))+)$/;
-const REQUESTS: Readonly<Record<string, string>> = {
-	'Draft an e-mail from this message.': 'email',
-	'Create a task from this message.': 'task',
-	'Schedule a meeting about this message.': 'meeting'
-};
+// A map rather than an object: the first line is whatever its author wrote, and the names every
+// object holds, such as constructor, are no actions
+const REQUESTS: ReadonlyMap<string, string> = new Map([
+	['Draft an e-mail from this message.', 'email'],
+	['Create a task from this message.', 'task'],
+	['Schedule a meeting about this message.', 'meeting']
+]);
 
 export interface AskedMessage {
 	// The action picked in Twake Chat, or null when the user picked none
@@ -58,7 +82,7 @@ export function askedMessage(text: string): AskedMessage | null {
 	if (match?.groups === undefined) return null;
 	const { request, author = '', quote = '' } = match.groups;
 	return {
-		request: request === undefined ? null : (REQUESTS[request] ?? 'other'),
+		request: request === undefined ? null : (REQUESTS.get(request) ?? 'other'),
 		quoted: {
 			author,
 			email: '',

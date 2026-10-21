@@ -14,7 +14,6 @@ import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { MAX_LENGTH, mayArrangeMeeting } from '../suggestions/prefilter.js';
 import {
 	askedMessage,
-	DECISION_MAX_TOKENS,
 	MEETING_THRESHOLD,
 	meetingRequest,
 	readMeeting
@@ -39,6 +38,7 @@ import {
 	laneOf,
 	readProbabilities,
 	REFUSE_THRESHOLD,
+	routeMaxTokens,
 	routeRequest,
 	WRITE_THRESHOLD,
 	type Capability,
@@ -115,9 +115,10 @@ export interface TurnInput {
 export interface TurnGuard {
 	// The model that checks an answer, sentence by sentence
 	readonly checkModel: string;
-	// The decision model that tells what a message asks for and sorts the answers worth a check,
-	// or empty when the gateway serves none
-	readonly decisionModel: string;
+	// The decision model that tells what a message asks for and sorts the answers worth a check.
+	// Whatever asks it has the limits of a decision, few tokens within a few seconds: past them a
+	// sorting is one that failed, and the turn goes on.
+	readonly decision: LlmClient;
 	// What a tool does for the owner in an application, as they read it, or null when it only reads
 	action(tool: string): string | null;
 	// What the assistant can do in its owner's applications, reads before writes
@@ -479,7 +480,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		);
 	}
 	const spent: Spent = { tokens: 0, unreported: false };
-	const decisionModel = guard?.decisionModel ?? '';
+	const decision = guard?.decision ?? null;
 	const capabilities = guard?.capabilities() ?? [];
 	const capabilityNames = new Set(capabilities.map((capability) => capability.name));
 	const actionOf = (tool: string): string | null => guard?.action(tool) ?? null;
@@ -502,8 +503,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	});
 
 	// What the owner's message asks for, told by a decision model before the assistant's model
-	// reads it: the lane of the turn, and the capabilities it names. A sorting that fails leaves
-	// the turn to the model.
+	// reads it: the lane of the turn, and the capabilities it names. A sorting that fails, or that
+	// comes later than a decision may, leaves the turn to the model.
 	async function route(state: TurnStep): Promise<TurnUpdate> {
 		// The measure never fails the turn, and is over before the turn goes on
 		const [sent] = await Promise.allSettled([sort(state), scoreAsked()]);
@@ -515,12 +516,12 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// the decision model as a channel's message is: whether a suggestion could have come of it.
 	// Measured, never acted on, and spent on no one's tokens: it reads the message alone, without
 	// the one before it that a channel gives, and from a conversation the listener may never read,
-	// so a miss counted here is one of the decision model on a lone message. The log lines hold no
-	// word of it.
+	// so a miss counted here is one of the decision model on a lone message. A sorting that fails or
+	// comes later than a decision may counts as unknown. The log lines hold no word of it.
 	const fromChat: { readonly request: string | null; readonly caught: boolean | null }[] = [];
 	async function scoreAsked(): Promise<void> {
 		const message = input.message === null ? null : askedMessage(input.message);
-		if (message === null) return;
+		if (decision === null || message === null) return;
 		const words = mayArrangeMeeting(message.quoted.text);
 		// A channel never sorts a message this long: it was missed whatever the model says
 		if (message.quoted.text.length > MAX_LENGTH) {
@@ -533,10 +534,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		}
 		let probability: number | null = null;
 		try {
-			const sorted = await deps.llm.complete(meetingRequest([message.quoted]), [], {
-				model: decisionModel,
-				maxTokens: DECISION_MAX_TOKENS
-			});
+			const sorted = await decision.complete(meetingRequest([message.quoted]), []);
 			probability = readMeeting(sorted.content);
 		} catch (err: unknown) {
 			deps.log.warn({ err }, 'asked message not sorted');
@@ -547,11 +545,11 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	}
 
 	async function sort(state: TurnStep): Promise<TurnUpdate> {
-		if (capabilities.length === 0 || input.message === null) return {};
+		if (decision === null || capabilities.length === 0 || input.message === null) return {};
 		try {
 			const started = performance.now();
-			const sorted = await deps.llm.complete(routeRequest(capabilities, past, input.message), [], {
-				model: decisionModel
+			const sorted = await decision.complete(routeRequest(capabilities, past, input.message), [], {
+				maxTokens: routeMaxTokens(capabilities.length, decision.maxTokens)
 			});
 			spend(deps.log, state.iteration, sorted, spent);
 			const given = readProbabilities(sorted.content);
@@ -824,35 +822,43 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 
 	// The harness's check of the words of an answer, in a turn that could act for its owner and did
 	// not. A decision model first tells, in a fraction of a second, whether the exchange has to do
-	// with what the assistant can do: one that has not is sent as it is. For the others, a model
-	// reads the answer sentence by sentence, with what came before it, and names those that say the
-	// assistant did something in an application. The words stay as they are; the owner then reads
-	// below them that nothing was done. A check that fails changes nothing.
+	// with what the assistant can do: one that has not is sent as it is, and one it could not sort is
+	// checked all the same. For the others, a model reads the answer sentence by sentence, with what
+	// came before it, and names those that say the assistant did something in an application. The
+	// words stay as they are; the owner then reads below them that nothing was done. A check that
+	// fails changes nothing.
 	async function verify(state: TurnStep): Promise<TurnUpdate> {
 		// A turn others started says what the harness chose for it, and is not checked
-		if (guard === undefined || comesFromOthers(input.context.origin)) return {};
+		if (guard === undefined || decision === null || comesFromOthers(input.context.origin)) {
+			return {};
+		}
 		const steps = state.steps ?? [];
 		// A turn that did something for its owner may say so: only one that did nothing is checked
 		const acted = steps.some((step) => step.done && actionOf(step.tool) !== null);
 		const canAct = deps.tools.definitions.some((tool) => actionOf(tool.function.name) !== null);
 		if (!canAct || acted) return {};
 		const words = state.answer ?? '';
+		const actions = deps.tools.definitions
+			.filter((tool) => actionOf(tool.function.name) !== null)
+			.map((tool) => ({ name: tool.function.name, description: tool.function.description }));
+		const last = [...past, ...state.messages].filter((said) => said.role === 'user').at(-1);
+		// A sorting that fails is no probability, and no probability never spares an answer its check
+		let probability: number | null = null;
 		try {
-			const actions = deps.tools.definitions
-				.filter((tool) => actionOf(tool.function.name) !== null)
-				.map((tool) => ({ name: tool.function.name, description: tool.function.description }));
-			const last = [...past, ...state.messages].filter((said) => said.role === 'user').at(-1);
 			const started = performance.now();
-			const sorted = await deps.llm.complete(sortRequest(actions, last?.content ?? '', words), [], {
-				model: decisionModel
-			});
+			const sorted = await decision.complete(sortRequest(actions, last?.content ?? '', words), []);
 			spend(deps.log, state.iteration, sorted, spent);
-			const probability = readSort(sorted.content);
+			probability = readSort(sorted.content);
 			deps.log.info(
 				{ probability, durationMs: Math.round(performance.now() - started) },
 				'answer sorted'
 			);
-			if (!isConcerned(probability)) return {};
+		} catch (err: unknown) {
+			if (!(err instanceof LlmError)) throw err;
+			deps.log.warn({ err }, 'answer not sorted');
+		}
+		if (!isConcerned(probability)) return {};
+		try {
 			const sentences = sentencesOf(words, input.locale);
 			// What the owner's events say, when the turn did not read them: a sentence that reports one
 			// is then told from a sentence that claims an action
@@ -978,7 +984,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		.addConditionalEdges(
 			START,
 			(state) =>
-				decisionModel.length > 0 && input.message !== null && !comesFromOthers(input.context.origin)
+				decision !== null && input.message !== null && !comesFromOthers(input.context.origin)
 					? 'route'
 					: thinker(state),
 			['route', ...THINKERS, 'wrapUp']
