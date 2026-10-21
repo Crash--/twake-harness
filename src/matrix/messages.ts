@@ -26,6 +26,9 @@ export interface ReadMessage {
 	// The root of its thread, or main for the room's main timeline, as read receipts name them. An
 	// edit reads as main: its relation names the message it replaces, not a thread.
 	readonly thread: string;
+	// The message an edit replaces, null for a message that is no edit. Clients copy the mentions of
+	// the message they edit into the edit's, so an edit's mentions are mostly the same again.
+	readonly replaces: string | null;
 	// When the matrix role received it, by its own clock
 	readonly receivedAt: Date;
 }
@@ -46,12 +49,16 @@ function mentionsOf(content: Record<string, unknown>): string[] {
 	return [...new Set(userIds.filter((userId): userId is string => typeof userId === 'string'))];
 }
 
-// The root of the thread a content's relation puts its message in, null when it puts it in none
-function threadOf(content: Record<string, unknown>): string | null {
+// The event a content's relation of this type names: the root of the thread it puts its message
+// in, or the message it replaces; null when it has no relation of that type
+function relatedBy(
+	content: Record<string, unknown>,
+	relType: 'm.thread' | 'm.replace'
+): string | null {
 	const relation = content['m.relates_to'];
-	if (!isRecord(relation) || relation['rel_type'] !== 'm.thread') return null;
-	const root = relation['event_id'];
-	return typeof root === 'string' ? root : null;
+	if (!isRecord(relation) || relation['rel_type'] !== relType) return null;
+	const related = relation['event_id'];
+	return typeof related === 'string' ? related : null;
 }
 
 // A message as the matrix role reads it once, from its content, as decrypted when it came
@@ -67,7 +74,8 @@ export function messageOf(roomId: string, event: RoomEvent, receivedAt: Date): R
 		sender,
 		text: textOf(event),
 		mentions: mentionsOf(content),
-		thread: threadOf(content) ?? MAIN_THREAD,
+		thread: relatedBy(content, 'm.thread') ?? MAIN_THREAD,
+		replaces: relatedBy(content, 'm.replace'),
 		receivedAt
 	};
 }

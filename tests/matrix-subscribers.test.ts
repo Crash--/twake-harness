@@ -130,6 +130,7 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 						text: 'The figures are in',
 						mentions: [],
 						thread: 'main',
+						replaces: null,
 						receivedAt: new Date('2026-10-19T09:00:00Z')
 					},
 					assistant: null
@@ -144,6 +145,7 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 						text: 'Alice, can you check them?',
 						mentions: [alice.userId],
 						thread: root,
+						replaces: null,
 						receivedAt: new Date('2026-10-19T09:00:00Z')
 					},
 					assistant: null
@@ -342,6 +344,7 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 						text: 'Carol, are yours right?',
 						mentions: [carol.userId],
 						thread: root,
+						replaces: null,
 						receivedAt: new Date('2026-10-19T10:00:00Z')
 					},
 					assistant: { owner: CAROL, userId: assistant }
