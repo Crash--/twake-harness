@@ -313,8 +313,14 @@ function turnOf(job: SendJob): TurnRef | null {
 
 // What an assistant knows of the encryption of one of its rooms
 type RoomEncryption = 'encrypted' | 'clear' | 'unreadable';
+// What a check of a room concludes, or that it could not complete, which says nothing of the room
 type ListenVerdict =
-	'ok' | 'not_encrypted' | 'owner_left' | 'no_other_person' | 'not_everyone_accepted';
+	| 'ok'
+	| 'not_encrypted'
+	| 'owner_left'
+	| 'no_other_person'
+	| 'not_everyone_accepted'
+	| 'check_failed';
 
 // The Matrix error code of a failed request, which the SDK carries on what it throws
 function errcodeOf(err: unknown): string | null {
@@ -1034,7 +1040,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (!direct && config.suggestions.enabled) {
 			// Checked and recorded in one go: whoever comes in meanwhile is checked against the row
 			const verdict = await roomChecks.run(roomId, async (): Promise<ListenVerdict> => {
-				let checked: ListenVerdict = 'not_encrypted';
+				let checked: ListenVerdict = 'check_failed';
 				try {
 					checked = await checkListenedRoom(intent, roomId, inviter, invited);
 				} catch (err: unknown) {
@@ -1048,9 +1054,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				}
 				return checked;
 			});
-			if (verdict === 'not_everyone_accepted') {
-				// The other person said no, or was never asked: it leaves without a word
-				log.info({ roomId, invited, reason: 'no_consent' }, 'assistant declined an invite');
+			if (verdict === 'not_everyone_accepted' || verdict === 'check_failed') {
+				// The other person said no, or was never asked, or the room could not be checked: it
+				// leaves without a word, since nothing says that the room is not a private conversation
+				log.info(
+					{ roomId, invited, reason: verdict === 'check_failed' ? 'check_failed' : 'no_consent' },
+					'assistant declined an invite'
+				);
 				try {
 					await intent.leaveRoom(roomId);
 				} catch (err: unknown) {
