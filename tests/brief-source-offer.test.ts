@@ -54,9 +54,9 @@ function sourceOffer(application: string): string {
 	return `Veux-tu que j'écoute ${application} ? Ton brief te dirait ce qui t'y arrive.`;
 }
 
-// The registry of a deployment that keeps the Chat closed, as it will be once briefs make source
-// offers, as they will of the Chat and Space: one of her calendar, which her assistant listens to by
-// default, of her mail and of her drive
+// The registry of a deployment that keeps the Chat closed, so that no brief makes its source
+// offer, with more source offers than briefs make yet, as they will once Space has one: one of
+// her calendar, which her assistant listens to by default, one of her mail and one of her drive
 const OFFERING: readonly SourceEntry[] = sourceRegistryOf({ chatMentions: { enabled: false } }).map(
 	(entry) =>
 		['calendar', 'mail', 'drive'].includes(entry.source)
@@ -351,10 +351,11 @@ describe('my brief offers me once, after it, to listen to an application I never
 		expect(await allowed()).toContain('drive');
 	});
 
-	it('offers nothing for an application I chose for, listening there or not, nor for one my assistant listens to by default', async () => {
+	it('offers nothing for an application I chose for, listening there or not, nor for one my assistant listens to by default, nor the Chat the deployment keeps closed', async () => {
 		await choose('mail', true);
 		await choose('drive', false);
-		// Friday 23 October: her calendar, offered too, is listened to already
+		// Friday 23 October: her calendar, offered too, is listened to already, and the Chat, which she
+		// never chose for, cannot be listened to
 		const friday = await briefOf('2026-10-23T06:00:00Z');
 		expect(friday.body).toBe(WRITTEN);
 		expect(isQuestion(friday)).toBe(false);

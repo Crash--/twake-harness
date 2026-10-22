@@ -78,7 +78,7 @@ import {
 	type ClosedRequest,
 	type PendingCallInput
 } from '../consents/repository.js';
-import { labelOf, type DomainDescriptions } from '../contracts/domains.js';
+import type { DomainDescriptions } from '../contracts/domains.js';
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { eraseActivityNames, listUntoldActivities } from '../journal/repository.js';
@@ -103,7 +103,13 @@ import {
 } from '../settings/repository.js';
 import { nextOffer, noteOffer, SOURCE_OFFER } from '../sources/offers.js';
 import { listenUnlessChosen, listListened } from '../sources/repository.js';
-import { publishedUnder, type Source, type SourceRegistry } from '../sources/sources.js';
+import {
+	publishedUnder,
+	sourceName,
+	type Source,
+	type SourceRegistry
+} from '../sources/sources.js';
+import { listenerName } from '../suggestions/listener.js';
 import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
@@ -1227,9 +1233,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 
 	// The source offer the brief makes after it, if any: to have the owner's assistant listen to the
 	// first source of the registry they may be offered, in their language, the application named as
-	// the catalog names it, unless another request of the room waits for their answer, or, answered
-	// yes, to run, which its question would supersede. The question of their first brief and the one
-	// it waits for close with it.
+	// the catalog names it, or as the harness does, and the listener as its members see it, unless
+	// another request of the room waits for their answer, or, answered yes, to run, which its question
+	// would supersede. The question of their first brief and the one it waits for close with it.
 	async function offerOf(tx: Tx, writing: Writing): Promise<SourceOffer | null> {
 		const { principal, session, locale, mayOffer } = writing;
 		if (mayOffer === null) return null;
@@ -1242,8 +1248,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		const lifetimeMs = config.consent.requestLifetimeMs;
 		if (await isRequestWaiting(tx, owner, mayOffer.roomId, lifetimeMs, closing)) return null;
 		const { source } = entry;
-		const { name } = labelOf(deps.domains(), source, 'read', locale, config.locale);
-		const text = entry.offer(getMessages(locale), name);
+		const name = sourceName(deps.domains(), source, locale, config.locale);
+		const text = entry.offer(getMessages(locale), name, listenerName(config));
 		return {
 			source,
 			text,

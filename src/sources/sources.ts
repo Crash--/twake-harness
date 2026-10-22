@@ -30,9 +30,9 @@ export interface SourceEntry {
 	// there, and by none other: none where only their brief tells them what arrives
 	readonly publishedAs: readonly string[];
 	// Its source offer, the question a brief may ask its owner once, after it, of having their
-	// assistant listen there, in their language, the application named as the catalog names it: none
-	// where no brief makes one
-	readonly offer?: (messages: Messages, application: string) => string;
+	// assistant listen there, in their language, the application named as they read it and the
+	// listener as the members of its rooms see it: none where no brief makes one
+	readonly offer?: (messages: Messages, application: string, listener: string) => string;
 }
 
 // Every source, as a deployment has it, in the order of SOURCES
@@ -43,7 +43,8 @@ export type SourceRegistry = readonly SourceEntry[];
 // takes, so that listening there only has the brief read them: Mail waits for the owner's yes to the
 // question of their first brief, and Drive for their asking. The Chat's are the mentions the harness
 // hears there itself, under its own source, and its listening reads nothing through a contract: it
-// waits for the owner's asking, where the deployment opened it. None has a source offer yet.
+// waits for the owner's yes to the source offer of a brief, or for their asking, where the deployment
+// opened it.
 const ENTRIES: Readonly<Record<Source, Omit<SourceEntry, 'source'>>> = {
 	calendar: {
 		listenable: true,
@@ -54,7 +55,14 @@ const ENTRIES: Readonly<Record<Source, Omit<SourceEntry, 'source'>>> = {
 	tasks: { listenable: true, byDefault: true, reads: 'tasks', publishedAs: ['twake://tasks'] },
 	mail: { listenable: true, byDefault: false, reads: 'mail', publishedAs: [] },
 	drive: { listenable: true, byDefault: false, reads: 'drive', publishedAs: [] },
-	chat: { listenable: true, byDefault: false, reads: null, publishedAs: [CHAT_SOURCE] }
+	chat: {
+		listenable: true,
+		byDefault: false,
+		reads: null,
+		publishedAs: [CHAT_SOURCE],
+		offer: (messages, application, listener) =>
+			messages.sources.chatSourceOffer(application, listener)
+	}
 };
 
 // The sources as a deployment has them: the Chat cannot be listened to unless it opened it, with
@@ -130,7 +138,7 @@ export function sourceName(
 }
 
 // The harness's own words that confirm the owner's choice for a source, in their language, the
-// application named as the catalog names it: what reaches them in an application that wakes no
+// application named as they read it: what reaches them in an application that wakes no
 // assistant, such as Mail or Drive, only their brief tells them of; listening to the Chat says
 // where their assistant hears the mentions of them, which includes the channels the listener, named
 // as their members see it, is in, and its assistant reads nothing there once it stops
