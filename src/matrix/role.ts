@@ -530,10 +530,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	});
 
 	// The one visible user that reads the channels it is invited to (see docs/suggestions.md)
+	const listenerIntent = appservice.getIntentForUserId(listenerUserId(config));
 	const listener = makeChannelListener({
 		config,
 		admin,
-		intent: appservice.getIntentForUserId(listenerUserId(config)),
+		intent: listenerIntent,
 		log,
 		forget: (roomId) => suggestions.forget(roomId)
 	});
@@ -612,15 +613,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	};
 
 	// The mentions of the owners in the channels the listener is in, which wake their assistant once
-	// they leave them unread (see docs/events.md), the room read as the listener reads it
+	// they leave them unread (see docs/events.md), the room and its messages read as the listener
+	// reads them
 	const mentions = makeMentionIntake({
 		config,
 		db,
 		log,
 		roomState: async (roomId) =>
-			(await appservice
-				.getIntentForUserId(listenerUserId(config))
-				.underlyingClient.getRoomState(roomId)) as RoomEvent[]
+			(await listenerIntent.underlyingClient.getRoomState(roomId)) as RoomEvent[],
+		roomEvent: async (roomId, eventId) =>
+			(await listenerIntent.underlyingClient.getEvent(roomId, eventId)) as RoomEvent
 	});
 
 	const subscribers = [suggesting, seeing, mentions, ...(options.subscribers ?? [])];

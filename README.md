@@ -61,7 +61,7 @@ The assistant tells its owner, in their room and in a few words, of what arrives
 - **A meeting moved**: who moved it, from when to when, and whether they are free over its new slot, with its decline prepared when the slot conflicts and its acceptance otherwise.
 - **A meeting cancelled**: who cancelled which meeting, in one sentence, asking nothing, and closing the question that still waits for their answer to its invitation, unless one occurrence of a series is cancelled.
 - **A counter-proposal** to a meeting they organize: which invitee proposes which time, and whether they are free then.
-- **A mention of them in the Chat** that they leave unread for ten minutes, in an unencrypted room they and the channel listener are in: who wrote it, in which room, and the link that opens it, the mentions of one room in one message. The Chat is listened to only once they ask, and only where the deployment allows it.
+- **A mention of them in the Chat** that they leave unread for ten minutes, in an unencrypted room they and the channel listener are in: who wrote it, in which room, and the link that opens it, the mentions of one room in one message. A mention they read, by a public read receipt on its thread, or after which they write in its room, wakes nobody; private read receipts never reach the harness. The Chat is listened to only once they ask, and only where the deployment allows it.
 
 A meeting's new title, the invitees' answers to a meeting they organize, and an activity that names them without expecting anything of them, as a member or a recipient rather than as an assignee, someone mentioned or an invitee, wake nobody: their brief tells them. An owner chooses what their assistant listens to: Calendar and Tasks by default, Mail from their yes to their first brief's question, and Drive and the Chat once they ask. Mail and Drive publish nothing the harness takes yet, so listening there only puts them in the brief.
 
@@ -138,7 +138,7 @@ A deployment may also run the organization agent, with a name and a persona of i
 
 - The harness logs every action with its metadata, and the conversation itself only at the `debug` level, so the messages it decrypts stay out of production logs.
 - To propose meetings, the harness holds the last message of each conversation it reads in memory for fifteen minutes, as context for the next. The messages it hands the model are written only in the job that carries them to it, deleted once the model answered or the job was dropped. A proposal keeps its conversation and its slot, never a message; the proposals log no message, at any level, and nothing of them is used to train a model.
-- A mention in the Chat waits for its wake-up with the words of its message, cut to 1,000 characters, and the room's name, readable by its owner alone; both go once the wake-up took it. The journal keeps who wrote it and the room, never the words.
+- A mention in the Chat waits for its wake-up with the words of its message, cut to 1,000 characters, and the room's name, readable by its owner alone; both go once the wake-up took it, or once they read it or wrote in its room after it. The journal keeps who wrote it and the room, never the words.
 - The listening journal forgets the titles and times of its activities after seven days, and the activities themselves after 30 days by default.
 
 ### What deletion erases

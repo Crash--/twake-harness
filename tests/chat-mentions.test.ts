@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runBriefPass } from '../src/briefs/schedule.js';
 import type { Config } from '../src/config.js';
 import { withPrincipal } from '../src/db/client.js';
+import { runMigrations } from '../src/db/migrate.js';
 import type { Subscriber } from '../src/matrix/subscribers.js';
 import { holdMention } from '../src/mentions/repository.js';
 import { CHAT_SOURCE } from '../src/sources/sources.js';
@@ -95,23 +96,33 @@ describe('a mention of me I leave unread for ten minutes, in an unencrypted room
 	const clock = makeSettableClock(MORNING);
 	let bob: MatrixUser;
 	let rooms = 0;
-	// The messages the matrix role handed its subscribers, by their id: the last of them, this one,
-	// gets a message once the mentions are done with it
+	// The messages the matrix role handed its subscribers, by their id, and the read receipts, by who
+	// read up to which message: the last of them, this one, gets each once the mentions are done
+	// with it
 	const handedOver = new Set<string>();
+	const receiptsHanded = new Set<string>();
 	const recorder: Subscriber = {
 		name: 'recorder',
 		message: async (message) => {
 			handedOver.add(message.eventId);
+		},
+		receipt: async (receipt) => {
+			receiptsHanded.add(`${receipt.userId} ${receipt.eventId}`);
 		}
 	};
 
-	// A message as a client writes it, with whatever its content holds
-	async function send(user: MatrixUser, room: string, content: Record<string, unknown>) {
+	// A message as a client writes it, with whatever its content holds, or an event of another type
+	async function send(
+		user: MatrixUser,
+		room: string,
+		content: Record<string, unknown>,
+		type = 'm.room.message'
+	) {
 		const txn = `${Date.now()}-${Math.random()}`;
 		const sent = await r.h.synapse.request(
 			user,
 			'PUT',
-			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.room.message/${txn}`,
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/${type}/${txn}`,
 			content
 		);
 		expect(sent.status).toBe(200);
@@ -121,6 +132,53 @@ describe('a mention of me I leave unread for ten minutes, in an unencrypted room
 	// A mention of a user by the pill of their name, in the room's main timeline
 	function mentionOf(user: MatrixUser, body: string): Record<string, unknown> {
 		return { msgtype: 'm.text', body, 'm.mentions': { user_ids: [user.userId] } };
+	}
+
+	// A message in the thread of a root, as a client writes it, which one without threads shows as a
+	// reply to the root
+	function inThread(root: string, content: Record<string, unknown>): Record<string, unknown> {
+		return {
+			...content,
+			'm.relates_to': {
+				rel_type: 'm.thread',
+				event_id: root,
+				is_falling_back: true,
+				'm.in_reply_to': { event_id: root }
+			}
+		};
+	}
+
+	// A reaction to a message of a room, as a client sends it
+	async function react(user: MatrixUser, room: string, eventId: string): Promise<string> {
+		const relation = { rel_type: 'm.annotation', event_id: eventId, key: '👍' };
+		return send(user, room, { 'm.relates_to': relation }, 'm.reaction');
+	}
+
+	// The redaction of a message of a room, as a client sends it once its author deletes it
+	async function redact(user: MatrixUser, room: string, eventId: string): Promise<void> {
+		const txn = `${Date.now()}-${Math.random()}`;
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/redact/${encodeURIComponent(eventId)}/${txn}`;
+		const redacted = await r.h.synapse.request(user, 'PUT', path, {});
+		expect(redacted.status).toBe(200);
+	}
+
+	// A read receipt on a message of a room, as a client sends it, public unless said otherwise
+	async function read(
+		user: MatrixUser,
+		room: string,
+		eventId: string,
+		type: 'm.read' | 'm.read.private' = 'm.read'
+	): Promise<void> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/receipt/${type}/${encodeURIComponent(eventId)}`;
+		const sent = await r.h.synapse.request(user, 'POST', path, {});
+		expect(sent.status).toBe(200);
+	}
+
+	// The matrix role handed on a user's public read receipt to its subscribers, whatever came of it
+	async function receiptHanded(user: MatrixUser, eventId: string): Promise<void> {
+		await until('the read receipt was handed over', () =>
+			receiptsHanded.has(`${user.userId} ${eventId}`)
+		);
 	}
 
 	// A clear channel of Bob's, named, which Alice joined and where the listener was invited, a new
@@ -466,6 +524,7 @@ describe('a mention of me I leave unread for ten minutes, in an unencrypted room
 				eventId: foreign,
 				thread: 'main',
 				sender: FOREIGN,
+				sentAt: new Date('2026-10-20T08:00:01Z'),
 				receivedAt: new Date('2026-10-20T08:00:01Z'),
 				text: 'Alice, from afar',
 				roomName: 'lobby'
@@ -532,6 +591,174 @@ describe('a mention of me I leave unread for ten minutes, in an unencrypted room
 		expect(settledAs(mention)).toEqual(['woken']);
 	});
 
+	it('settles a mention I read within ten minutes, by my public receipt on it or on a later message of its thread, waking nobody', async () => {
+		const room = await channel();
+		const mention = await mentionAt(MORNING, room, 'Alice, the minutes');
+		await read(r.alice, room, mention);
+		await receiptHanded(r.alice, mention);
+		expect(settledAs(mention)).toEqual(['read']);
+		// Two more, read at once by her receipt on Bob's next words
+		const first = await mentionAt(MORNING, room, 'Alice, the budget');
+		const second = await mentionAt(MORNING, room, 'Alice, the agenda');
+		const after = await send(bob, room, { msgtype: 'm.text', body: 'Thanks, all' });
+		await handled(after);
+		await read(r.alice, room, after);
+		await receiptHanded(r.alice, after);
+		expect([...settledAs(first), ...settledAs(second)]).toEqual(['read', 'read']);
+		await pass(TEN_MINUTES_ON);
+		for (const eventId of [mention, first, second]) {
+			expect(turnCalls(r.h.apisix.llm.calls, eventId)).toEqual([]);
+			expect(settledAs(eventId)).toEqual(['read']);
+		}
+		// The lines name the owner, the room and the message, never the author nor the words
+		expect(
+			mentionLines(mention).map(({ msg, owner, roomId, reason }) => ({
+				msg,
+				owner,
+				roomId,
+				reason
+			}))
+		).toEqual([
+			{ msg: 'mention pending', owner: ALICE, roomId: room, reason: undefined },
+			{ msg: 'mention settled', owner: ALICE, roomId: room, reason: 'read' }
+		]);
+		expect(JSON.stringify(mentionLines(mention))).not.toContain(bob.userId);
+	});
+
+	it('wakes my assistant for a mention of a thread I read the main timeline of alone, and for one I read only up to an earlier message', async () => {
+		// A receipt covers the thread of its message alone
+		const room = await channel();
+		const root = await send(bob, room, { msgtype: 'm.text', body: 'The budget, in a thread' });
+		await handled(root);
+		clock.set(MORNING);
+		const threaded = await send(bob, room, inThread(root, mentionOf(r.alice, 'Alice, yours?')));
+		await waits(threaded);
+		const later = await send(bob, room, { msgtype: 'm.text', body: 'Meanwhile, the agenda' });
+		await handled(later);
+		await read(r.alice, room, later);
+		await receiptHanded(r.alice, later);
+		// Read up to the message before the mention, in its own thread
+		const other = await channel();
+		const before = await send(bob, other, { msgtype: 'm.text', body: 'Morning, all' });
+		await handled(before);
+		const unread = await mentionAt(MORNING, other, 'Alice, the invoices');
+		await read(r.alice, other, before);
+		await receiptHanded(r.alice, before);
+		expect([...settledAs(threaded), ...settledAs(unread)]).toEqual([]);
+		await pass(TEN_MINUTES_ON);
+		expect(dataOf(await toldOf(threaded))).toMatchObject({ id: threaded, room });
+		expect(dataOf(await toldOf(unread))).toMatchObject({ id: unread, room: other });
+		expect([...settledAs(threaded), ...settledAs(unread)]).toEqual(['woken', 'woken']);
+	});
+
+	it('settles a mention of a thread by my receipt on a reaction in it, and one of the main timeline by my receipt on a reaction to the root of a thread, waking nobody', async () => {
+		// What a reaction relates to is the thread its receipt covers, as the spec has it, a client
+		// with threads sending its receipt on the thread's last event, a reaction as well
+		const room = await channel();
+		const root = await send(bob, room, { msgtype: 'm.text', body: 'The launch, in a thread' });
+		await handled(root);
+		const onMain = await mentionAt(MORNING, room, 'Alice, the venue');
+		const threaded = await send(
+			bob,
+			room,
+			inThread(root, mentionOf(r.alice, 'Alice, the guests?'))
+		);
+		await waits(threaded);
+		const inIt = await react(bob, room, threaded);
+		await read(r.alice, room, inIt);
+		await receiptHanded(r.alice, inIt);
+		expect(settledAs(threaded)).toEqual(['read']);
+		expect(settledAs(onMain)).toEqual([]);
+		const toRoot = await react(bob, room, root);
+		await read(r.alice, room, toRoot);
+		await receiptHanded(r.alice, toRoot);
+		expect(settledAs(onMain)).toEqual(['read']);
+		await pass(TEN_MINUTES_ON);
+		for (const eventId of [onMain, threaded]) {
+			expect(turnCalls(r.h.apisix.llm.calls, eventId)).toEqual([]);
+			expect(settledAs(eventId)).toEqual(['read']);
+		}
+	});
+
+	it('wakes my assistant for a mention of the main timeline once I read up to a deleted message of a thread, whose thread nobody can tell', async () => {
+		// A redaction erases the relation of what it deletes, so that a receipt on it says nothing of
+		// the thread it covers: in doubt, the mention wakes
+		const room = await channel();
+		const root = await send(bob, room, { msgtype: 'm.text', body: 'The offsite, in a thread' });
+		await handled(root);
+		const onMain = await mentionAt(MORNING, room, 'Alice, the hotel');
+		const deleted = await send(bob, room, inThread(root, { msgtype: 'm.text', body: 'Oops' }));
+		await handled(deleted);
+		await redact(bob, room, deleted);
+		await read(r.alice, room, deleted);
+		await receiptHanded(r.alice, deleted);
+		expect(settledAs(onMain)).toEqual([]);
+		await pass(TEN_MINUTES_ON);
+		expect(dataOf(await toldOf(onMain))).toMatchObject({ id: onMain, room });
+		expect(settledAs(onMain)).toEqual(['woken']);
+	});
+
+	it('settles a mention once I write in its room after it, in any thread, an edit of mine included, waking nobody', async () => {
+		const room = await channel();
+		const root = await send(bob, room, { msgtype: 'm.text', body: 'The roadmap, in a thread' });
+		await handled(root);
+		clock.set(MORNING);
+		const threaded = await send(bob, room, inThread(root, mentionOf(r.alice, 'Alice, the dates?')));
+		await waits(threaded);
+		// Her words on the main timeline, after it
+		const words = await send(r.alice, room, { msgtype: 'm.text', body: 'On it' });
+		await handled(words);
+		expect(settledAs(threaded)).toEqual(['replied']);
+		// Her words in the thread, after a mention of the main timeline
+		const onMain = await mentionAt(MORNING, room, 'Alice, the budget');
+		const inIt = await send(r.alice, room, inThread(root, { msgtype: 'm.text', body: 'Coming' }));
+		await handled(inIt);
+		expect(settledAs(onMain)).toEqual(['replied']);
+		// Her edit of her first words, after one more
+		const another = await mentionAt(MORNING, room, 'Alice, the venue');
+		const edit = await send(r.alice, room, {
+			msgtype: 'm.text',
+			body: '* On it, today',
+			'm.new_content': { msgtype: 'm.text', body: 'On it, today' },
+			'm.relates_to': { rel_type: 'm.replace', event_id: words }
+		});
+		await handled(edit);
+		expect(settledAs(another)).toEqual(['replied']);
+		await pass(TEN_MINUTES_ON);
+		for (const eventId of [threaded, onMain, another]) {
+			expect(turnCalls(r.h.apisix.llm.calls, eventId)).toEqual([]);
+			expect(settledAs(eventId)).toEqual(['replied']);
+		}
+	});
+
+	it('wakes nobody at the end of my quiet hours for a mention I read during them', async () => {
+		const room = await channel();
+		// A Tuesday at nine in the evening in Paris, read at eleven
+		const mention = await mentionAt('2026-10-20T19:00:00Z', room, 'Alice, before tomorrow');
+		await pass('2026-10-20T19:10:00Z');
+		clock.set('2026-10-20T21:00:00Z');
+		await read(r.alice, room, mention);
+		await receiptHanded(r.alice, mention);
+		expect(settledAs(mention)).toEqual(['read']);
+		// Past eight the next morning
+		await pass('2026-10-21T06:05:00Z');
+		expect(turnCalls(r.h.apisix.llm.calls, mention)).toEqual([]);
+		expect(settledAs(mention)).toEqual(['read']);
+	});
+
+	it('wakes my assistant for a mention I read with a private receipt alone, which the harness never sees, nor settles one by anyone else’s receipt', async () => {
+		const room = await channel();
+		const mention = await mentionAt(MORNING, room, 'Alice, the contract');
+		await read(r.alice, room, mention, 'm.read.private');
+		// Bob's public receipt, after hers, handed on once hers would have been
+		await read(bob, room, mention);
+		await receiptHanded(bob, mention);
+		expect(settledAs(mention)).toEqual([]);
+		await pass(TEN_MINUTES_ON);
+		expect(dataOf(await toldOf(mention))).toMatchObject({ id: mention, room });
+		expect(settledAs(mention)).toEqual(['woken']);
+	});
+
 	it('wakes nobody past my hourly cap, my journal noting it as capped', async () => {
 		const room = await channel();
 		const mention = await mentionAt(MORNING, room, 'Alice, the invoices');
@@ -582,6 +809,26 @@ describe('a mention of me I leave unread for ten minutes, in an unencrypted room
 		await pass(TEN_MINUTES_ON);
 		expect(turnCalls(r.h.apisix.llm.calls, mention)).toEqual([]);
 		expect(settledAs(mention)).toEqual([]);
+	});
+
+	it('keeps, from the rollout of the time the homeserver gives each message, the mentions that waited, timed by when the matrix role received them', async () => {
+		const room = await channel();
+		const waited = await mentionAt(MORNING, room, 'Alice, the minutes');
+		// It waits in the table as the table was before, the rows under their owners' security
+		await r.h.db.sql`alter table pending_mentions drop column sent_at`;
+		await r.h.db
+			.sql`delete from schema_migrations where name = '0106_pending_mentions_sent_at.sql'`;
+		expect((await runMigrations(r.h.db)).applied).toEqual(['0106_pending_mentions_sent_at.sql']);
+		const [times] = await withPrincipal(
+			r.h.db,
+			{ id: ALICE },
+			(tx) => tx.sql<{ sent_at: Date; received_at: Date }[]>`
+				select sent_at, received_at from pending_mentions where event_id = ${waited}`
+		);
+		expect(times?.sent_at).toEqual(times?.received_at);
+		await pass(TEN_MINUTES_ON);
+		expect(dataOf(await toldOf(waited))['mentions']).toHaveLength(1);
+		expect(settledAs(waited)).toEqual(['woken']);
 	});
 
 	it('takes no mention while the deployment keeps the Chat closed, and lets go of those that waited, waking nobody', async () => {

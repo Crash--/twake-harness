@@ -67,6 +67,14 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 		return sent.body['event_id'] as string;
 	}
 
+	// When the homeserver says a message of a room was sent, as a member reads it there
+	async function sentAt(user: MatrixUser, room: string, eventId: string): Promise<Date> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/event/${encodeURIComponent(eventId)}`;
+		const event = await h.synapse.request(user, 'GET', path);
+		expect(event.status).toBe(200);
+		return new Date(event.body['origin_server_ts'] as number);
+	}
+
 	// A public read receipt on a message of a room, as a client sends it
 	async function read(user: MatrixUser, room: string, eventId: string): Promise<void> {
 		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/receipt/m.read/${encodeURIComponent(eventId)}`;
@@ -109,7 +117,7 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 		if (space !== undefined) await space.close();
 	});
 
-	it('hands on a message of a channel the listener is in with its text, mentions, thread, author and the time it received it', async () => {
+	it('hands on a message of a channel the listener is in with its text, mentions, thread, author, the time its homeserver gives it and the time it received it', async () => {
 		moment = new Date('2026-10-19T09:00:00Z');
 		try {
 			const root = await h.synapse.sendText(bob, channel, 'The figures are in');
@@ -131,6 +139,7 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 						mentions: [],
 						thread: 'main',
 						replaces: null,
+						sentAt: await sentAt(bob, channel, root),
 						receivedAt: new Date('2026-10-19T09:00:00Z')
 					},
 					assistant: null
@@ -146,6 +155,7 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 						mentions: [alice.userId],
 						thread: root,
 						replaces: null,
+						sentAt: await sentAt(bob, channel, reply),
 						receivedAt: new Date('2026-10-19T09:00:00Z')
 					},
 					assistant: null
@@ -345,6 +355,8 @@ describe('the matrix role reads each message once, and hands it to its subscribe
 						mentions: [carol.userId],
 						thread: root,
 						replaces: null,
+						// Decrypted, as it was sent encrypted
+						sentAt: await sentAt(dave, room, reply),
 						receivedAt: new Date('2026-10-19T10:00:00Z')
 					},
 					assistant: { owner: CAROL, userId: assistant }
