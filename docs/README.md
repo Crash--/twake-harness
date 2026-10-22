@@ -6,7 +6,7 @@ The [README](../README.md) says what the harness does for an owner and their ass
 - [Configuration](configuration.md): every environment variable, its default, and the migrations.
 - [Assistants](assistants.md): [While a turn works](assistants.md#while-a-turn-works), [Organization agent](assistants.md#organization-agent), [Skills](assistants.md#skills), [Session search](assistants.md#session-search), [Language](assistants.md#language) and [Time zone](assistants.md#time-zone).
 - [Encryption](encryption.md): [Encryption](encryption.md#encryption), [The owner's sessions](encryption.md#the-owners-sessions) and [Key escrow](encryption.md#key-escrow).
-- [Events](events.md): [Events](events.md#events), [The activity exchange](events.md#the-activity-exchange), [Calendar's invitations](events.md#calendars-invitations), [Listening journal](events.md#listening-journal), [Listened sources](events.md#listened-sources) and [Quiet hours](events.md#quiet-hours).
+- [Events](events.md): [Events](events.md#events), [The activity exchange](events.md#the-activity-exchange), [Calendar's invitations](events.md#calendars-invitations), [Listening journal](events.md#listening-journal), [Listened sources](events.md#listened-sources), [Chat mentions](events.md#chat-mentions) and [Quiet hours](events.md#quiet-hours).
 - [Suggestions](suggestions.md): the meetings an assistant proposes from what is said in a channel or in a listened conversation.
 - [Morning brief](morning-brief.md): the brief of the owner's working day, its settings, and the brief they ask for.
 - [Consent](consent.md): what an assistant asks before it reads or writes, the token broker's permission, previews, deletion, the consent API and its metrics.

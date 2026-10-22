@@ -191,6 +191,12 @@ export interface Config {
 		// Twake Space's notifications, which receive a suggestion for its user; null for none
 		readonly space: { readonly apiUrl: URL; readonly apiToken: string } | null;
 	};
+	// The Chat's mentions: whether owners may have their assistant listen to the Chat, off unless a
+	// deployment turns it on. Listening there wakes the assistant for a mention of its owner they
+	// left unread for ten minutes, in the channels the listener is in, which the suggestions register.
+	readonly chatMentions: {
+		readonly enabled: boolean;
+	};
 	// The language of the fixed texts of the assistants and the creator
 	readonly locale: Locale;
 	// The IANA time zone the assistants read the present in, such as Europe/Paris, until a read of
@@ -297,6 +303,7 @@ const envSchema = z.object({
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
 	SUGGESTIONS_USER_LOCALPART: z.string().min(1).default('twake-assistant'),
 	SUGGESTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
+	CHAT_MENTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
 	SPACE_API_URL: z.string().default(''),
 	SPACE_API_TOKEN: z.string().default(''),
 	ASSISTANT_LOCALE: z.enum(LOCALES).default('en'),
@@ -436,6 +443,17 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: SUGGESTIONS_USER_LOCALPART must not be MATRIX_SENDER_LOCALPART nor start with ${values.MATRIX_ASSISTANT_PREFIX}`
 		);
 	}
+	// The matrix role hears the channels through the listener alone, which the suggestions register;
+	// the other roles hear none
+	if (
+		values.HARNESS_ROLE === 'matrix' &&
+		values.CHAT_MENTIONS_ENABLED === 'true' &&
+		values.SUGGESTIONS_ENABLED !== 'true'
+	) {
+		throw new Error(
+			'invalid configuration: CHAT_MENTIONS_ENABLED needs SUGGESTIONS_ENABLED on the matrix role, whose listener hears the channels'
+		);
+	}
 	if (values.SPACE_API_URL !== '' && !URL.canParse(values.SPACE_API_URL)) {
 		throw new Error('invalid configuration: SPACE_API_URL is not a URL');
 	}
@@ -559,6 +577,7 @@ export function loadConfig(env: Env): Config {
 					? null
 					: { apiUrl: new URL(values.SPACE_API_URL), apiToken: values.SPACE_API_TOKEN }
 		},
+		chatMentions: { enabled: values.CHAT_MENTIONS_ENABLED === 'true' },
 		locale: values.ASSISTANT_LOCALE,
 		timeZone,
 		logLevel: values.LOG_LEVEL

@@ -1,4 +1,6 @@
-import type { Messages } from '../i18n/messages.js';
+import type { Config } from '../config.js';
+import { labelOf, type DomainDescriptions } from '../contracts/domains.js';
+import type { Locale, Messages } from '../i18n/messages.js';
 
 // The applications an owner's assistant may listen to, by the names their consents give them, in
 // the order a brief offers them: what one of them publishes for the owner wakes the assistant only
@@ -9,6 +11,10 @@ export type Source = (typeof SOURCES)[number];
 // The source the calendar producer gave the invitations it published, which the harness gives
 // Calendar's notifications and keeps their wake-ups by
 export const CALENDAR_SOURCE = 'twake://calendar';
+
+// The source the harness gives the wake-ups of the mentions it hears in the Chat: its own, which
+// no producer publishes
+export const CHAT_SOURCE = 'twake://chat';
 
 // What the harness knows of a source
 export interface SourceEntry {
@@ -29,14 +35,15 @@ export interface SourceEntry {
 	readonly offer?: (messages: Messages, application: string) => string;
 }
 
-// Every source, as the harness knows it, in the order of SOURCES
+// Every source, as a deployment has it, in the order of SOURCES
 export type SourceRegistry = readonly SourceEntry[];
 
 // Calendar and Tasks are listened to by default: the harness takes the activities their producers
 // publish, Calendar's notifications under the source it names them by. Mail and Drive publish none it
 // takes, so that listening there only has the brief read them: Mail waits for the owner's yes to the
-// question of their first brief, and Drive for their asking. The Chat cannot be listened to yet, and
-// its listening will read nothing through a contract. None has a source offer yet.
+// question of their first brief, and Drive for their asking. The Chat's are the mentions the harness
+// hears there itself, under its own source, and its listening reads nothing through a contract: it
+// waits for the owner's asking, where the deployment opened it. None has a source offer yet.
 const ENTRIES: Readonly<Record<Source, Omit<SourceEntry, 'source'>>> = {
 	calendar: {
 		listenable: true,
@@ -47,30 +54,35 @@ const ENTRIES: Readonly<Record<Source, Omit<SourceEntry, 'source'>>> = {
 	tasks: { listenable: true, byDefault: true, reads: 'tasks', publishedAs: ['twake://tasks'] },
 	mail: { listenable: true, byDefault: false, reads: 'mail', publishedAs: [] },
 	drive: { listenable: true, byDefault: false, reads: 'drive', publishedAs: [] },
-	chat: { listenable: false, byDefault: false, reads: null, publishedAs: [] }
+	chat: { listenable: true, byDefault: false, reads: null, publishedAs: [CHAT_SOURCE] }
 };
 
-export const SOURCE_REGISTRY: SourceRegistry = SOURCES.map((source) => ({
-	source,
-	...ENTRIES[source]
-}));
+// The sources as a deployment has them: the Chat cannot be listened to unless it opened it, with
+// CHAT_MENTIONS_ENABLED
+export function sourceRegistryOf(config: Pick<Config, 'chatMentions'>): SourceRegistry {
+	return SOURCES.map((source) => ({
+		source,
+		...ENTRIES[source],
+		...(source === 'chat' && !config.chatMentions.enabled ? { listenable: false } : {})
+	}));
+}
 
-// The sources their owner may have their assistant listen to or not
-export const LISTENABLE: readonly Source[] = SOURCE_REGISTRY.filter(
-	(entry) => entry.listenable
-).map((entry) => entry.source);
+// The sources of a registry their owner may have their assistant listen to or not
+export function listenableOf(registry: SourceRegistry): Source[] {
+	return registry.filter((entry) => entry.listenable).map((entry) => entry.source);
+}
 
 // The listenable sources their assistant listens to unless they said otherwise
-export const LISTENED_BY_DEFAULT: readonly Source[] = SOURCE_REGISTRY.filter(
-	(entry) => entry.byDefault
-).map((entry) => entry.source);
+export const LISTENED_BY_DEFAULT: readonly Source[] = SOURCES.filter(
+	(source) => ENTRIES[source].byDefault
+);
 
 export function isSource(value: string): value is Source {
 	return (SOURCES as readonly string[]).includes(value);
 }
 
-export function isListenable(value: string): value is Source {
-	return (LISTENABLE as readonly string[]).includes(value);
+export function isListenable(registry: SourceRegistry, value: string): value is Source {
+	return (listenableOf(registry) as string[]).includes(value);
 }
 
 // The application a source's listening allows its assistant to read, if any
@@ -78,9 +90,10 @@ export function readDomainOf(source: Source): string | null {
 	return ENTRIES[source].reads;
 }
 
-// The listenable source an activity was published under, or null for one nobody listens to
-export function sourceOfActivity(published: string): Source | null {
-	const entry = SOURCE_REGISTRY.find(
+// The source of a registry an activity was published under, while it may be listened to, or null
+// for one nobody listens to
+export function sourceOfActivity(registry: SourceRegistry, published: string): Source | null {
+	const entry = registry.find(
 		({ listenable, publishedAs }) => listenable && publishedAs.includes(published)
 	);
 	return entry?.source ?? null;
@@ -93,21 +106,47 @@ export function wakesAssistant(source: Source): boolean {
 
 // What the producers of the sources given publish their activities under
 export function publishedUnder(sources: readonly Source[]): string[] {
-	return SOURCE_REGISTRY.filter(({ source }) => sources.includes(source)).flatMap(
-		({ publishedAs }) => publishedAs
+	return SOURCES.filter((source) => sources.includes(source)).flatMap(
+		(source) => ENTRIES[source].publishedAs
 	);
+}
+
+// The names the harness gives the applications no contract of the catalog names, in every
+// language: the Chat's, whose mentions it hears itself
+const OWN_NAMES: Readonly<Partial<Record<Source, string>>> = { chat: 'Twake Chat' };
+
+// An application named as its owner reads it, in their language: as the catalog names it, or else
+// as the harness does
+export function sourceName(
+	domains: DomainDescriptions,
+	source: Source,
+	locale: Locale,
+	fallback: Locale
+): string {
+	const own = OWN_NAMES[source];
+	return own === undefined || domains.has(source)
+		? labelOf(domains, source, 'read', locale, fallback).name
+		: own;
 }
 
 // The harness's own words that confirm the owner's choice for a source, in their language, the
 // application named as the catalog names it: what reaches them in an application that wakes no
-// assistant, such as Mail or Drive, only their brief tells them of
+// assistant, such as Mail or Drive, only their brief tells them of; listening to the Chat says
+// where their assistant hears the mentions of them, which includes the channels the listener, named
+// as their members see it, is in, and its assistant reads nothing there once it stops
 export function listeningSaid(
 	messages: Messages,
 	source: Source,
 	application: string,
-	listening: boolean
+	listening: boolean,
+	listener: string
 ): string {
 	const { sources } = messages;
+	if (source === 'chat') {
+		return listening
+			? sources.listeningToChat(application, listener)
+			: sources.notListeningToChat(application);
+	}
 	if (wakesAssistant(source)) {
 		return listening ? sources.listening(application) : sources.notListening(application);
 	}

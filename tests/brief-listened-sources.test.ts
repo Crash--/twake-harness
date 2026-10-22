@@ -5,7 +5,7 @@ import { withPrincipal } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { noteActivity, type Noted } from '../src/journal/repository.js';
 import { listListened, saveListening } from '../src/sources/repository.js';
-import { CALENDAR_SOURCE } from '../src/sources/sources.js';
+import { CALENDAR_SOURCE, sourceRegistryOf } from '../src/sources/sources.js';
 import { INVITED_EVENT_TYPE, TASK_ASSIGNED_EVENT_TYPE } from '../src/wakeups/event-types.js';
 import { lastUser, until } from './helpers/activity.js';
 import {
@@ -179,7 +179,9 @@ describe('my brief tells only of the applications my assistant listens to', () =
 
 	// The applications an owner's assistant listens to
 	const listened = (owner: string): Promise<string[]> =>
-		withPrincipal(r.h.db, { id: owner }, (tx) => listListened(tx, owner));
+		withPrincipal(r.h.db, { id: owner }, (tx) =>
+			listListened(tx, owner, sourceRegistryOf(r.h.config))
+		);
 
 	beforeAll(async () => {
 		r = await startConsentRoom(

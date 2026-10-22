@@ -52,6 +52,10 @@ _Avoid_: notification, alert, ping
 A message, comment or post that names the owner explicitly, as the pill of their name does in Twake Chat, rather than by a word of its text. `@room` mentions no one.
 _Avoid_: ping, tag, highlight
 
+**Pending mention**:
+A mention of the owner in Twake Chat that the harness keeps, its words included, until it is settled, as the wake-up it gives once they left it unread for ten minutes settles it, and then erases.
+_Avoid_: unread mention (what Twake Chat counts), queued notification
+
 **Listener**:
 The harness's one account in the clear rooms of Twake Chat, `@twake-assistant`, which reads what is said there for the owners in them and never writes.
 _Avoid_: channel bot, listening bot

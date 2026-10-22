@@ -187,6 +187,8 @@ export async function startTestSynapse(
 		rc_login: { address: GENEROUS, account: GENEROUS, failed_attempts: GENEROUS },
 		rc_joins: { local: GENEROUS, remote: GENEROUS },
 		rc_invites: { per_room: GENEROUS, per_user: GENEROUS, per_issuer: GENEROUS },
+		// Ten rooms a user creates at once by default, which a suite with a room for each test passes
+		rc_room_creation: GENEROUS,
 		...settings
 	});
 	await writeFile(configPath, dump(config));

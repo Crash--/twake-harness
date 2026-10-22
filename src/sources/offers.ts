@@ -10,15 +10,18 @@ import {
 	grantConsent,
 	markReplayed
 } from '../consents/repository.js';
-import { labelOf, type DomainDescriptions } from '../contracts/domains.js';
+import type { DomainDescriptions } from '../contracts/domains.js';
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import type { Principal } from '../principals/principal.js';
+import { listenerName } from '../suggestions/listener.js';
 import { findChoices, saveListening } from './repository.js';
 import {
 	isListenable,
+	isSource,
 	listeningSaid,
 	readDomainOf,
+	sourceName,
 	type Source,
 	type SourceEntry,
 	type SourceRegistry
@@ -65,7 +68,7 @@ export async function noteOffer(tx: Tx, owner: string, source: Source): Promise<
 
 // The source a source offer's call offers, or null for any other call
 function offeredSource(call: { readonly tool: string; readonly domain: string }): Source | null {
-	return call.tool === SOURCE_OFFER && isListenable(call.domain) ? call.domain : null;
+	return call.tool === SOURCE_OFFER && isSource(call.domain) ? call.domain : null;
 }
 
 // The owner said no to a source offer a brief made them: they chose for their assistant not to
@@ -85,6 +88,8 @@ export interface SourceOfferDeps {
 	readonly db: Db;
 	// How the catalog names the applications to their owners, as it last loaded
 	readonly domains: () => DomainDescriptions;
+	// The sources as the deployment has them
+	readonly sources: SourceRegistry;
 }
 
 // The owner's yes to a source offer a brief made them
@@ -119,7 +124,7 @@ export async function acceptSourceOffer(
 		if (approved.tool !== SOURCE_OFFER) throw new Error('the call is no source offer');
 		await markReplayed(tx, pendingCallId);
 		const source = approved.domain;
-		if (!isListenable(source)) return null;
+		if (!isListenable(deps.sources, source)) return null;
 		const reads = readDomainOf(source);
 		if (reads !== null) await grantConsent(tx, principal.id, reads, 'read', input.through);
 		await saveListening(tx, principal.id, source, true);
@@ -128,6 +133,9 @@ export async function acceptSourceOffer(
 	if (accepted === null) return { kind: 'missing' };
 	const { source, locale } = accepted;
 	input.log.info({ pendingCallId, source, listening: true }, 'listened source set');
-	const { name } = labelOf(deps.domains(), source, 'read', locale, config.locale);
-	return { kind: 'ok', text: listeningSaid(getMessages(locale), source, name, true) };
+	const name = sourceName(deps.domains(), source, locale, config.locale);
+	return {
+		kind: 'ok',
+		text: listeningSaid(getMessages(locale), source, name, true, listenerName(config))
+	};
 }

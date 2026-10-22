@@ -5,7 +5,7 @@ import { BRIEF_DOMAINS } from '../src/briefs/questions.js';
 import { runBriefPass } from '../src/briefs/schedule.js';
 import { withPrincipal } from '../src/db/client.js';
 import { findChoices, listListened, saveListening } from '../src/sources/repository.js';
-import { SOURCE_REGISTRY, type Source, type SourceEntry } from '../src/sources/sources.js';
+import { sourceRegistryOf, type Source, type SourceEntry } from '../src/sources/sources.js';
 import { lastUser, until } from './helpers/activity.js';
 import {
 	BRIEF_CATALOG,
@@ -54,12 +54,14 @@ function sourceOffer(application: string): string {
 	return `Veux-tu que j'écoute ${application} ? Ton brief te dirait ce qui t'y arrive.`;
 }
 
-// The registry as it will be once briefs make source offers, as they will of the Chat and Space:
-// one of her calendar, which her assistant listens to by default, of her mail and of her drive
-const OFFERING: readonly SourceEntry[] = SOURCE_REGISTRY.map((entry) =>
-	['calendar', 'mail', 'drive'].includes(entry.source)
-		? { ...entry, offer: (_messages, application) => sourceOffer(application) }
-		: entry
+// The registry of a deployment that keeps the Chat closed, as it will be once briefs make source
+// offers, as they will of the Chat and Space: one of her calendar, which her assistant listens to by
+// default, of her mail and of her drive
+const OFFERING: readonly SourceEntry[] = sourceRegistryOf({ chatMentions: { enabled: false } }).map(
+	(entry) =>
+		['calendar', 'mail', 'drive'].includes(entry.source)
+			? { ...entry, offer: (_messages, application) => sourceOffer(application) }
+			: entry
 );
 
 // What the harness says once Alice had her assistant listen to her drive, which only her brief
@@ -159,7 +161,7 @@ describe('my brief offers me once, after it, to listen to an application I never
 
 	// The applications her assistant listens to
 	const listened = (): Promise<string[]> =>
-		withPrincipal(r.h.db, { id: ALICE }, (tx) => listListened(tx, ALICE));
+		withPrincipal(r.h.db, { id: ALICE }, (tx) => listListened(tx, ALICE, OFFERING));
 
 	// The applications she allowed her assistant to read, as she reads them through the API
 	async function allowed(): Promise<string[]> {
