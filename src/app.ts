@@ -20,6 +20,7 @@ import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { findBriefQuestion, refuseBriefQuestion } from './briefs/questions.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
+import { makeMatrixOpenIdVerifier } from './auth/matrix-openid.js';
 import type { Config } from './config.js';
 import type { Answer } from './consents/answers.js';
 import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
@@ -211,6 +212,11 @@ const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
 const RECOVERY_NEEDED = { error: 'recovery_needed' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
+// An owner calling with their Matrix OpenID token acts for themself only
+const NOT_THE_OWNER = { error: 'not the owner' } as const;
+const HOMESERVER_UNAVAILABLE = { error: 'homeserver unavailable' } as const;
+const PROVISIONING_PREFIX = '/v1/provisioning/';
+const MATRIX_OPENID_TIMEOUT_MS = 5_000;
 
 // An answer to a call no longer waiting: answered already, expired, or replaced by a newer
 // question in its room
@@ -414,6 +420,30 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		reply.header(REQUEST_ID_HEADER, request.id);
 	});
 
+	// The pages of these origins call the provisioning API from the browser, with the Matrix
+	// OpenID token of their user
+	if (config.provisioning.corsOrigins.length > 0) {
+		const origins = new Set(config.provisioning.corsOrigins);
+		app.addHook('onRequest', async (request, reply) => {
+			const origin = request.headers.origin;
+			if (!request.url.startsWith(PROVISIONING_PREFIX)) return;
+			// Every answer varies by origin, so that a cache never hands one origin's answer to another
+			reply.header('vary', 'Origin');
+			if (origin === undefined || !origins.has(origin)) return;
+			reply
+				.header('access-control-allow-origin', origin)
+				.header('access-control-expose-headers', 'Retry-After, X-Request-Id');
+		});
+		app.options(`${PROVISIONING_PREFIX}*`, async (_request, reply) =>
+			reply
+				.code(204)
+				.header('access-control-allow-methods', 'GET, PUT, POST')
+				.header('access-control-allow-headers', 'Authorization, Content-Type, X-Matrix-Server-Name')
+				.header('access-control-max-age', '600')
+				.send()
+		);
+	}
+
 	// Behind the gateway only: when a shared secret is set, every request of the API carries it,
 	// which the gateway injects and nobody else knows; the health check and the metrics stay open
 	if (config.gateway.sharedSecret !== null) {
@@ -429,16 +459,71 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 	app.get('/health', async () => ({ status: 'ok', ...options.health?.() }));
 
+	const verifyOpenId =
+		config.provisioning.matrixFederationUrl === null
+			? null
+			: makeMatrixOpenIdVerifier({
+					federationUrl: config.provisioning.matrixFederationUrl,
+					serverName: config.matrix.serverName,
+					timeoutMs: MATRIX_OPENID_TIMEOUT_MS
+				});
+	// What the logs name an owner calling for their own assistant
+	const OWNER_CLIENT = 'matrix-openid';
+
 	// A provisioner, such as the identity server the Twake Chat clients ask for their assistant,
 	// acts for the owner it names after authenticating them itself. Only the service clients named
-	// in the settings may, never a user. The owner is named by their Matrix identifier on the
-	// assistants' homeserver, as the provisioner authenticated them: their principal is the
-	// platform's email for that account. Resolves to the client admitted and the owner it acts for,
-	// or null once refused.
+	// in the settings may, or the owner themself with a Matrix OpenID token, for their own
+	// assistant only. The owner is named by their Matrix identifier on the assistants' homeserver:
+	// their principal is the platform's email for that account. Resolves to the client admitted
+	// and the owner it acts for, or null once refused.
 	async function admitProvisioner(
 		request: FastifyRequest,
 		reply: FastifyReply
 	): Promise<{ client: string; owner: string; ownerUserId: string } | null> {
+		const caller = await provisioningCaller(request, reply);
+		if (caller === null) return null;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		if (caller.userId !== null && caller.userId !== ownerUserId) {
+			request.log.info({ client: caller.client, reason: 'not_the_owner' }, 'provisioning refused');
+			await reply.code(403).send(NOT_THE_OWNER);
+			return null;
+		}
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) {
+			await reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+			return null;
+		}
+		return { client: caller.client, owner, ownerUserId };
+	}
+
+	// The caller of the provisioning API: a provisioner's service client, or an owner (userId set)
+	// whose Matrix OpenID token the assistants' homeserver vouches for
+	async function provisioningCaller(
+		request: FastifyRequest,
+		reply: FastifyReply
+	): Promise<{ client: string; userId: string | null } | null> {
+		const serverName = request.headers['x-matrix-server-name'];
+		if (typeof serverName === 'string') {
+			const verified =
+				verifyOpenId === null
+					? ({ ok: false, reason: 'invalid' } as const)
+					: await verifyOpenId(request.headers.authorization, serverName);
+			if (!verified.ok) {
+				request.log.info(
+					{
+						client: OWNER_CLIENT,
+						reason: verified.reason,
+						...('status' in verified ? { status: verified.status } : {})
+					},
+					'provisioning refused'
+				);
+				await (verified.reason === 'unavailable'
+					? reply.code(502).send(HOMESERVER_UNAVAILABLE)
+					: reply.code(401).send({ error: 'invalid token' }));
+				return null;
+			}
+			return { client: OWNER_CLIENT, userId: verified.userId };
+		}
 		const auth = await authenticate(request.headers.authorization);
 		if (!auth.ok) {
 			request.log.info({ reason: auth.reason }, 'provisioning refused');
@@ -451,13 +536,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			await reply.code(403).send(NOT_A_PROVISIONER);
 			return null;
 		}
-		const { owner: ownerUserId } = request.params as { owner: string };
-		const owner = principalOfMatrixUser(config, ownerUserId);
-		if (owner === null) {
-			await reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
-			return null;
-		}
-		return { client, owner, ownerUserId };
+		return { client, userId: null };
 	}
 
 	// The provisioner's answer once the owner's assistant exists, whether the provisioner read it or

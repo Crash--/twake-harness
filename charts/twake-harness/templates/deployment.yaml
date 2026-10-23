@@ -190,6 +190,13 @@ spec:
               value: {{ .Values.config.orgAgentMembers | quote }}
             - name: PROVISIONER_CLIENT_IDS
               value: {{ .Values.config.provisionerClientIds | quote }}
+            {{- if and .Values.config.matrixFederationUrl (not .Values.config.matrixServerName) }}
+            {{- fail "config.matrixFederationUrl needs config.matrixServerName, the homeserver whose tokens it checks" }}
+            {{- end }}
+            - name: MATRIX_FEDERATION_URL
+              value: {{ .Values.config.matrixFederationUrl | quote }}
+            - name: PROVISIONING_CORS_ORIGINS
+              value: {{ .Values.config.provisioningCorsOrigins | quote }}
             {{- /* The worker role alone listens to RabbitMQ, and only it gets the broker's address. It wakes the owners by their email on the mail domain, MATRIX_MAIL_DOMAIN or else MATRIX_SERVER_NAME, which every role gets when set */}}
             {{- if include "twake-harness.listens" . }}
             {{- if not (or .Values.config.matrixServerName .Values.config.matrixMailDomain) }}

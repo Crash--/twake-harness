@@ -137,6 +137,11 @@ export interface Config {
 	readonly provisioning: {
 		// The service clients, by their token subject, allowed to provision an owner's assistant
 		readonly clientIds: readonly string[];
+		// The homeserver's federation API, which checks the Matrix OpenID token of an owner calling
+		// for their own assistant; null when owners may not call
+		readonly matrixFederationUrl: URL | null;
+		// The web origins whose pages may call the provisioning API from a browser
+		readonly corsOrigins: readonly string[];
 	};
 	readonly rabbitmq: {
 		// What the names of the queues and exchanges this instance declares on the broker start
@@ -269,6 +274,8 @@ const envSchema = z.object({
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	PROVISIONER_CLIENT_IDS: z.string().default(''),
+	MATRIX_FEDERATION_URL: z.string().default(''),
+	PROVISIONING_CORS_ORIGINS: z.string().default(''),
 	RABBITMQ_PREFIX: z
 		.string()
 		.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'a plain name, such as twake-harness-b2b')
@@ -433,6 +440,21 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
+	if (values.MATRIX_FEDERATION_URL !== '') {
+		if (
+			!URL.canParse(values.MATRIX_FEDERATION_URL) ||
+			!['http:', 'https:'].includes(new URL(values.MATRIX_FEDERATION_URL).protocol)
+		) {
+			throw new Error(
+				`invalid configuration: MATRIX_FEDERATION_URL ${JSON.stringify(values.MATRIX_FEDERATION_URL)} is not an http(s) URL`
+			);
+		}
+		if (values.MATRIX_SERVER_NAME === '') {
+			throw new Error(
+				'invalid configuration: MATRIX_FEDERATION_URL needs MATRIX_SERVER_NAME, the homeserver whose tokens it checks'
+			);
+		}
+	}
 	// The namespace tells the listener from the creator and the assistants by its name alone
 	if (
 		values.SUGGESTIONS_ENABLED === 'true' &&
@@ -549,7 +571,10 @@ export function loadConfig(env: Env): Config {
 			members: listOf(values.ORG_AGENT_MEMBERS)
 		},
 		provisioning: {
-			clientIds: listOf(values.PROVISIONER_CLIENT_IDS)
+			clientIds: listOf(values.PROVISIONER_CLIENT_IDS),
+			matrixFederationUrl:
+				values.MATRIX_FEDERATION_URL === '' ? null : new URL(values.MATRIX_FEDERATION_URL),
+			corsOrigins: listOf(values.PROVISIONING_CORS_ORIGINS)
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,

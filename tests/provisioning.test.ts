@@ -60,6 +60,16 @@ describe('the provisioning API admits its provisioners only', () => {
 		expect(asOwner.body).toEqual({ error: 'not a provisioner' });
 	});
 
+	it('refuses a Matrix OpenID token when no homeserver is set to check it', async () => {
+		const res = await h.app.inject({
+			method: 'GET',
+			url: provisioningPath(OWNER),
+			headers: { authorization: 'Bearer some-openid-token', 'x-matrix-server-name': 'test.local' }
+		});
+		expect(res.statusCode).toBe(401);
+		expect(res.json()).toEqual({ error: 'invalid token' });
+	});
+
 	it('refuses an owner who is not a user of the homeserver', async () => {
 		const elsewhere = await api.put(PROVISIONER, provisioningPath('@bob:elsewhere.example'), {});
 		expect(elsewhere.status).toBe(422);
@@ -1030,5 +1040,148 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 		expect(after.map((identity) => identity['masterKey'])).toEqual(
 			before.map((identity) => identity['masterKey'])
 		);
+	});
+});
+
+describe('an owner calls the provisioning API with their Matrix OpenID token', () => {
+	let h: MatrixTestHarness;
+	let carol: MatrixUser;
+	const CHAT_ORIGIN = 'https://chat.test.local';
+
+	async function openIdToken(user: MatrixUser): Promise<{ token: string; server: string }> {
+		const res = await h.synapse.request(
+			user,
+			'POST',
+			`/_matrix/client/v3/user/${encodeURIComponent(user.userId)}/openid/request_token`,
+			{}
+		);
+		expect(res.status).toBe(200);
+		const body = res.body as { access_token: string; matrix_server_name: string };
+		return { token: body.access_token, server: body.matrix_server_name };
+	}
+
+	async function asOwner(
+		user: MatrixUser,
+		method: 'GET' | 'PUT' | 'POST',
+		path: string,
+		payload?: Record<string, unknown>
+	): Promise<{ status: number; body: Record<string, unknown> }> {
+		const { token, server } = await openIdToken(user);
+		const res = await h.apps[0]!.inject({
+			method,
+			url: path,
+			headers: { authorization: `Bearer ${token}`, 'x-matrix-server-name': server },
+			...(payload === undefined ? {} : { payload })
+		});
+		return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+	}
+
+	beforeAll(async () => {
+		h = await startMatrixHarness({
+			env: { PROVISIONER_CLIENT_IDS: PROVISIONER, PROVISIONING_CORS_ORIGINS: CHAT_ORIGIN },
+			openIdFromSynapse: true
+		});
+		h.apisix.llm.script = (request: ChatRequest) => ({
+			content: `echo: ${request.messages.at(-1)?.content ?? ''}`
+		});
+		carol = await h.synapse.registerUser('carol', 'Carol Owner');
+	}, 240_000);
+	afterAll(async () => {
+		if (h !== undefined) await h.close();
+	});
+
+	it('gives the owner their own assistant, then reads it', async () => {
+		expect(await asOwner(carol, 'GET', provisioningPath(carol.userId))).toEqual({
+			status: 404,
+			body: { error: 'no assistant' }
+		});
+		let provisioned = await asOwner(carol, 'PUT', provisioningPath(carol.userId), {});
+		for (let i = 0; provisioned.status === 503 && i < 120; i += 1) {
+			await sleep(250);
+			provisioned = await asOwner(carol, 'PUT', provisioningPath(carol.userId), {});
+		}
+		expect(provisioned.status).toBe(200);
+		expect(provisioned.body['userId']).toMatch(/^@.+:test\.local$/);
+		expect(await asOwner(carol, 'GET', provisioningPath(carol.userId))).toEqual(provisioned);
+	});
+
+	it("turns the owner's suggestions, asks for their recovery and checks their home room", async () => {
+		const path = provisioningPath(carol.userId);
+		expect(await asOwner(carol, 'PUT', `${path}/suggestions`, { enabled: false })).toEqual({
+			status: 200,
+			body: { enabled: false }
+		});
+		expect(await asOwner(carol, 'GET', `${path}/suggestions`)).toEqual({
+			status: 200,
+			body: { enabled: false }
+		});
+		expect((await asOwner(carol, 'POST', `${path}/recover`, {})).status).toBe(202);
+		// Admitted: only the body is refused
+		expect((await asOwner(carol, 'PUT', `${path}/home`, {})).status).toBe(400);
+	});
+
+	it('still admits the provisioner beside the owners', async () => {
+		// Admitted, whatever state the assistant is in after the recovery asked above
+		const read = await h.api.get(PROVISIONER, provisioningPath(carol.userId));
+		expect([200, 409, 503]).toContain(read.status);
+	});
+
+	it('refuses an owner acting for someone else', async () => {
+		const res = await asOwner(carol, 'GET', provisioningPath('@dave:test.local'));
+		expect(res).toEqual({ status: 403, body: { error: 'not the owner' } });
+	});
+
+	it('refuses a token the homeserver does not know, and one of another homeserver', async () => {
+		const unknown = await h.apps[0]!.inject({
+			method: 'GET',
+			url: provisioningPath(carol.userId),
+			headers: { authorization: 'Bearer not-a-token', 'x-matrix-server-name': 'test.local' }
+		});
+		expect(unknown.statusCode).toBe(401);
+		const { token } = await openIdToken(carol);
+		const elsewhere = await h.apps[0]!.inject({
+			method: 'GET',
+			url: provisioningPath(carol.userId),
+			headers: { authorization: `Bearer ${token}`, 'x-matrix-server-name': 'elsewhere.example' }
+		});
+		expect(elsewhere.statusCode).toBe(401);
+		expect(elsewhere.json()).toEqual({ error: 'invalid token' });
+	});
+
+	it("lets the pages of the configured origins call from the browser, and no one else's", async () => {
+		const preflight = await h.apps[0]!.inject({
+			method: 'OPTIONS',
+			url: provisioningPath(carol.userId),
+			headers: {
+				origin: CHAT_ORIGIN,
+				'access-control-request-method': 'PUT',
+				'access-control-request-headers': 'authorization, x-matrix-server-name'
+			}
+		});
+		expect(preflight.statusCode).toBe(204);
+		expect(preflight.headers['access-control-allow-origin']).toBe(CHAT_ORIGIN);
+		expect(String(preflight.headers['access-control-allow-headers'])).toContain(
+			'X-Matrix-Server-Name'
+		);
+
+		const { token, server } = await openIdToken(carol);
+		const read = await h.apps[0]!.inject({
+			method: 'GET',
+			url: `${provisioningPath(carol.userId)}/suggestions`,
+			headers: {
+				origin: CHAT_ORIGIN,
+				authorization: `Bearer ${token}`,
+				'x-matrix-server-name': server
+			}
+		});
+		expect(read.headers['access-control-allow-origin']).toBe(CHAT_ORIGIN);
+		expect(read.headers['access-control-expose-headers']).toBe('Retry-After, X-Request-Id');
+
+		const stranger = await h.apps[0]!.inject({
+			method: 'OPTIONS',
+			url: provisioningPath(carol.userId),
+			headers: { origin: 'https://evil.example', 'access-control-request-method': 'PUT' }
+		});
+		expect(stranger.headers['access-control-allow-origin']).toBeUndefined();
 	});
 });
