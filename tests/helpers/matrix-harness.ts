@@ -62,6 +62,8 @@ export interface MatrixStartOptions {
 	readonly env?: Record<string, string>;
 	// Settings of its homeserver, over the suites' own
 	readonly synapse?: Readonly<Record<string, unknown>>;
+	// Whether the harness checks owners' Matrix OpenID tokens with that homeserver
+	readonly openIdFromSynapse?: boolean;
 	// How long the role lets the SDK process a push before it gives the push up
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
@@ -120,11 +122,14 @@ export async function startMatrixHarness(
 		QUIET_HOURS_DEFAULT: 'none',
 		...(options.env ?? {})
 	};
-	const config = loadConfig(settings);
 	const synapse = await startTestSynapse(
-		{ file: buildRegistrationFile(config, `http://${callbackHost()}:${port}`) },
+		{ file: buildRegistrationFile(loadConfig(settings), `http://${callbackHost()}:${port}`) },
 		options.synapse
 	);
+	// The homeserver's address is known once it started: a suite checking owners' OpenID tokens
+	// points the harness at it
+	if (options.openIdFromSynapse === true) settings['MATRIX_FEDERATION_URL'] = synapse.url;
+	const config = loadConfig(settings);
 	apisix.matrixUpstream = synapse.url;
 	apisix.matrixAsToken = asToken;
 	const db = makeDb(config.databaseUrl);

@@ -178,6 +178,14 @@ config:
   # The service clients, by token subject, allowed to provision an owner's assistant through the
   # provisioning API, such as the identity server Twake Chat asks (comma separated)
   provisionerClientIds: ''
+  # The homeserver's federation API, which checks the Matrix OpenID token of an owner calling the
+  # provisioning API for their own assistant, as Twake Chat does; empty to refuse those tokens. The
+  # harness calls it directly: with networkPolicy enabled, point it at the gateway (a route to
+  # /_matrix/federation/v1/openid/userinfo) or allow its address in networkPolicy.extraEgress,
+  # else every such call answers 502
+  matrixFederationUrl: ''
+  # The web origins whose pages may call the provisioning API from the browser (comma separated)
+  provisioningCorsOrigins: ''
   # The escrow of the assistants' identities in the platform OpenBao, through the openbao route
   # of APISIX, with the pod's Kubernetes identity (matrix role)
   escrowEnabled: false
